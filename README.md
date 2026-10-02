@@ -1,6 +1,6 @@
 # Force-Field Portal
 
-Public SaaS portal for the **Force Field Protocol** governance platform by Spin State Labs
+**Force Field Protocol** governance platform by Spin State Labs
 ("Force-Field as a Service", v0.2.1).
 
 The portal provides user registration/login, API key management, tiered rate limits, Stripe
