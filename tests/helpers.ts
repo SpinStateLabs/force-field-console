@@ -1,4 +1,4 @@
-// Test helpers for the Force-Field Portal test suite.
+// Test helpers for the Force-Field Console test suite.
 // MemStore is an in-memory stand-in for Netlify Blobs implementing the shared KV contract.
 
 import { setStoreForTesting, type KV } from "../src/lib/store";

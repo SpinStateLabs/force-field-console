@@ -1,4 +1,4 @@
-// Force-Field Portal — tier definitions.
+// Force-Field Console — tier definitions.
 //
 // price_usd_month values are DISPLAY copy for the landing page and dashboard.
 // What is billed is the Stripe Price referenced by STRIPE_PRICE_OPERATOR /

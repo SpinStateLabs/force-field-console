@@ -1,4 +1,4 @@
-// Force-Field Portal — the provisioning worker loop.
+// Force-Field Console — the provisioning worker loop.
 //
 // Synchronous Netlify functions have a short execution limit (seconds), too
 // short for an estate step that waits on a Fly exec or a machine boot. So the

@@ -1,4 +1,4 @@
-// Force-Field Portal — storage + environment access.
+// Force-Field Console — storage + environment access.
 //
 // A minimal KV abstraction over Netlify Blobs so tests can swap in an
 // in-memory store via setStoreForTesting(). The KV surface is deliberately
@@ -35,7 +35,28 @@ export function env(name: string): string | undefined {
 }
 
 /**
- * The portal's blob store.
+ * The deploy context of the running code ("production", "deploy-preview",
+ * "branch-deploy", "dev"). Netlify does NOT expose the build-time CONTEXT
+ * variable to functions at runtime (only URL, SITE_NAME and SITE_ID:
+ * docs.netlify.com/build/functions/environment-variables), so up to v0.2.1
+ * production silently used a deploy-scoped store and every deploy started
+ * with an empty one (found 2026-10-04: site store 0 keys, live deploy store 3).
+ * The runtime source is the invocation's context, Netlify.context.deploy.context;
+ * CONTEXT stays as the fallback for tests and local tooling.
+ */
+export function deployContext(): string | undefined {
+  const ctx = (globalThis as any).Netlify?.context?.deploy?.context;
+  return typeof ctx === "string" && ctx !== "" ? ctx : env("CONTEXT");
+}
+
+/** "site": the site-wide store (production deploys); "deploy": a deploy-scoped one (everything else). */
+export function storeScope(): "site" | "deploy" {
+  return deployContext() === "production" ? "site" : "deploy";
+}
+
+/**
+ * The console's blob store (the store keeps its original name, "portal":
+ * renaming it would orphan every record).
  * - testStore when installed (unit tests);
  * - the site-wide "portal" store in the production deploy context;
  * - a deploy-scoped "portal" store elsewhere (previews / branch deploys),
@@ -51,7 +72,7 @@ export async function portalStore(): Promise<KV> {
   // for ~13 s in production (measured 2026-09-14), and would let the estate
   // worker read a record older than the one it just saved. Latency is the price.
   const store =
-    env("CONTEXT") === "production"
+    storeScope() === "site"
       ? getStore({ name: "portal", consistency: "strong" })
       : getDeployStore({ name: "portal", consistency: "strong" });
   return {

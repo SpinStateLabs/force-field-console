@@ -1,4 +1,4 @@
-// Force-Field Portal — per-key rate limiting.
+// Force-Field Console — per-key rate limiting.
 //
 // Fixed windows stored in the portal blob store:
 //   "rate/<keyHash>/m<UTC yyyymmddHHMM>"  minute window, value { count }

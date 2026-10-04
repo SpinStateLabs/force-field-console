@@ -1,4 +1,4 @@
-// estate.mts — Force-Field Portal v0.2.0
+// estate.mts — Force-Field Console v0.2.0
 // The account's dedicated estate: status, one synchronous provisioning step
 // (a fallback; the dashboard kicks the background worker instead), retry, the customer's
 // Anthropic key placement (forwarded to Fly secrets, never stored, never

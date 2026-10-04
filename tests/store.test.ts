@@ -18,7 +18,7 @@ vi.mock("@netlify/blobs", () => ({
   },
 }));
 
-import { portalStore, setStoreForTesting } from "../src/lib/store";
+import { portalStore, setStoreForTesting, storeScope } from "../src/lib/store";
 
 describe("portalStore (production adapter)", () => {
   beforeEach(() => {
@@ -28,9 +28,27 @@ describe("portalStore (production adapter)", () => {
   });
   afterEach(() => {
     delete process.env.CONTEXT;
+    delete (globalThis as any).Netlify;
   });
 
-  it("opens the site-wide 'portal' store with STRONG consistency in production, a deploy-scoped one elsewhere", async () => {
+  it("takes the deploy context from the invocation (Netlify.context), because CONTEXT is not a runtime variable on Netlify", async () => {
+    // As on Netlify at runtime: no CONTEXT in the environment, only the invocation context.
+    delete process.env.CONTEXT;
+    (globalThis as any).Netlify = { context: { deploy: { context: "production" } } };
+    expect(storeScope()).toBe("site");
+    await portalStore();
+    expect(opened).toEqual([{ fn: "getStore", opts: { name: "portal", consistency: "strong" } }]);
+    opened.length = 0;
+    (globalThis as any).Netlify = { context: { deploy: { context: "deploy-preview" } } };
+    expect(storeScope()).toBe("deploy");
+    await portalStore();
+    expect(opened).toEqual([{ fn: "getDeployStore", opts: { name: "portal", consistency: "strong" } }]);
+    // Outside an invocation the context is null: never guess production.
+    (globalThis as any).Netlify = { context: null };
+    expect(storeScope()).toBe("deploy");
+  });
+
+  it("falls back to CONTEXT (tests, local tooling): site-wide 'portal' store with STRONG consistency in production, a deploy-scoped one elsewhere", async () => {
     process.env.CONTEXT = "production";
     await portalStore();
     expect(opened).toEqual([{ fn: "getStore", opts: { name: "portal", consistency: "strong" } }]);

@@ -1,4 +1,4 @@
-// estate-worker-background.mts — Force-Field Portal v0.2.0
+// estate-worker-background.mts — Force-Field Console v0.2.0
 // BACKGROUND function — the `-background` filename suffix is what Netlify
 // honours (a `background: true` config alone deployed as a synchronous
 // function, verified 2026-09-14); it answers 202 at once and may run 15 min.

@@ -1,4 +1,4 @@
-// Force-Field Portal — user records.
+// Force-Field Console — user records.
 //
 // Users are stored in the portal blob store at "users/<sha256(email)>" with a
 // pointer blob "uid/<id>" -> { email_key } for id-based lookup.

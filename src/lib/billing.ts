@@ -1,4 +1,4 @@
-// Force-Field Portal — billing state transitions driven by Stripe webhooks.
+// Force-Field Console — billing state transitions driven by Stripe webhooks.
 //
 // The webhook is the ONLY writer of user.tier for paid tiers. A subscription
 // in a granting status (active / trialing / past_due) with a known price sets

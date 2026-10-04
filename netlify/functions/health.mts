@@ -1,15 +1,15 @@
-// health.mts — Force-Field Portal v0.2.0
+// health.mts — Force-Field Console v0.2.0
 // Liveness probe plus the deployment's capability flags. Each flag reports
 // whether the variables for that capability are SET — it does not probe
 // Stripe, Fly or the engine (Declared, not Enforced). The landing page renders
 // its honest note from these flags, so the copy can never claim more than the
 // deployment is configured for.
 import type { Context, Config } from "@netlify/functions";
-import { env } from "../../src/lib/store";
+import { env, storeScope } from "../../src/lib/store";
 import { stripeConfig } from "../../src/lib/stripe";
 import { flyConfig } from "../../src/lib/fly";
 
-export const PORTAL_VERSION = "0.2.1";
+export const PORTAL_VERSION = "0.2.2";
 
 export default async (req: Request, _context: Context): Promise<Response> => {
   if (req.method !== "GET") {
@@ -25,6 +25,9 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       estate_attached: Boolean(env("ESTATE_URL")),
       billing_configured: stripeConfig() !== null,
       provisioning_configured: flyConfig() !== null,
+      // Which blob store this invocation uses: "site" on production, "deploy" elsewhere.
+      // "deploy" on the production URL means records will not survive the next deploy.
+      store_scope: storeScope(),
       version: PORTAL_VERSION,
     }),
     { status: 200, headers: { "content-type": "application/json" } },

@@ -1,4 +1,4 @@
-// me.mts — Force-Field Portal v0.2.0
+// me.mts — Force-Field Console v0.2.0
 // Returns the authenticated user's profile, Declared tier limits, the billing
 // mirror (status only — never card data) and the estate summary.
 import type { Context, Config } from "@netlify/functions";

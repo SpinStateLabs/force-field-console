@@ -1,4 +1,4 @@
-// Force-Field Portal — API keys.
+// Force-Field Console — API keys.
 //
 // Only the sha256 hash of a key is stored; the plaintext is shown once at
 // creation and never again. Key records live at "keys/<hash>" and a KeyRef

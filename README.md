@@ -1,9 +1,14 @@
-# Force-Field Portal
+# Force-Field Console
 
 **Force Field Protocol** governance platform by Spin State Labs
-("Force-Field as a Service", v0.2.1).
+("Force-Field as a Service", v0.2.2).
 
-The portal provides user registration/login, API key management, tiered rate limits, Stripe
+> Renamed 2026-10-04: formerly Force-Field Portal (`force-field-portal`, then
+> `force-field-sandbox`). Live at https://force-field-console.netlify.app, the console of the
+> **Sandbox** environment; the two old `*.netlify.app` names are held by stub sites that
+> `301` there. The Netlify Blobs store keeps its original name, `portal`.
+
+The console provides user registration/login, API key management, tiered rate limits, Stripe
 billing for the paid tiers, automatic provisioning of one dedicated engine estate per paying
 account on Fly.io, and an authenticated API gateway that proxies `/api/v1/*` to the caller's
 estate (a Force Field Protocol engine: thirteen FastAPI services behind one reverse-proxy origin
@@ -72,7 +77,9 @@ netlify dev
   published production deploy.
 - Persistence is Netlify Blobs: the site-wide `portal` store in the production deploy
   context, a deploy-scoped store on previews/branch deploys (preview data never touches
-  production data).
+  production data). The context is read per invocation from `Netlify.context.deploy.context`
+  (`CONTEXT` is a build-time variable and is not set for functions at runtime);
+  `/api/health` reports `store_scope`, which must read `site` on the production URL.
 - Set `SESSION_SECRET` in the Netlify environment before the first deploy. Add
   `ESTATE_URL` (and `ESTATE_SHARED_SECRET`) when a sandbox estate is ready to attach, the
   `STRIPE_*` variables to sell the paid tiers, and the `FLY_*` + `ESTATE_SECRET_MASTER`
@@ -153,7 +160,7 @@ row and the customer's grantor row) → 8–10. `provision_{sentinel,gateway,cro
 fingerprint must equal the one generated at bootstrap) → `ready`.
 
 - The customer brings their own Anthropic key (`POST /api/estate/anthropic-key`): it is set as
-  a Fly secret on their estate and the machine restarts; the portal stores only the time.
+  a Fly secret on their estate and the machine restarts; the console stores only the time.
 - The customer's DOA roster row (`PUT /api/estate/roster`): allowed scopes, longest token,
   optional spend ceiling; grantor = the account email; rewritten in-machine, read per mint.
   The estate's roster is fail-closed (an invalid file refuses every mint, the platform's own
@@ -171,7 +178,7 @@ fingerprint must equal the one generated at bootstrap) → `ready`.
   destroyed by the tick. A transient Fly error is counted as `threw`, never as a missing app. The
   look runs in parallel with short timeouts and only while the tick has budget left (a skipped
   look is counted as `health_skipped_budget`), so a slow estate cannot push the scheduled function
-  past its 30 s limit. An app that was destroyed outside the portal turns the record into an
+  past its 30 s limit. An app that was destroyed outside the console turns the record into an
   honest `error` at step `create_app` with every machine-bound fact cleared (the gateway answers
   `503 estate_error`, not a dead origin); a retry provisions a fresh estate — new keys, empty ledger.
 - **Engine image rollout.** The image an estate runs is recorded at launch. When `FLY_ESTATE_IMAGE`
@@ -194,7 +201,7 @@ Enforced-vs-Declared: this section states what the code actually does and what h
 verified, not what a mature SaaS would do.
 
 - **Billing and provisioning are configuration-gated.** With no `STRIPE_*` / `FLY_*` variables
-  the portal sells nothing and provisions nothing, and says so (`501` codes, `/api/health`
+  the console sells nothing and provisions nothing, and says so (`501` codes, `/api/health`
   flags, the landing note).
 - **Verification status (2026-09-14).** Stripe and Fly paths are covered by 102 unit tests with
   the HTTP layer mocked (request shapes, signature scheme, state transitions, idempotency,
@@ -225,6 +232,13 @@ verified, not what a mature SaaS would do.
   the default was the same before it), which would bounce a new user to login, make a fresh API
   key answer 401 for a while, and let the estate worker read a record older than the one it just
   saved. Strong reads cost latency on every request.
+- **Store scope: fixed in 0.2.2 (2026-10-04).** Up to 0.2.1 the code chose the site-wide store
+  from `CONTEXT`, which Netlify does not set for functions at runtime, so production silently
+  used a deploy-scoped store and every deploy started with an empty one (found 2026-10-04: site
+  store 0 keys, the live deploy's store 3). 0.2.2 reads the deploy context from the invocation;
+  the existing records were copied to the site-wide store before the 0.2.2 deploy. Verified
+  through `/api/health` (`store_scope`) for HTTP functions only; the scheduled tick and the
+  background worker use the same signal and are not separately verified (Declared).
 - **Rate limiting is approximate.** Counters use read-increment-write blob storage with
   last-write-wins semantics, so concurrent requests can under-count. Limits are Declared,
   not Enforced hard caps.

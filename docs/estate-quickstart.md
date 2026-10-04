@@ -1,8 +1,8 @@
 # Dedicated estate quickstart
 
 For Operator and Sovereign accounts whose dashboard shows the estate as **ready**. Everything below
-goes through the portal gateway, `https://force-field-portal.netlify.app/api/v1/<service>/...`, with
-your portal API key in `x-api-key`. The gateway strips `/api/v1`, adds the estate's own perimeter
+goes through the console gateway, `https://force-field-console.netlify.app/api/v1/<service>/...`, with
+your console API key in `x-api-key`. The gateway strips `/api/v1`, adds the estate's own perimeter
 secret, and forwards your `x-field-*` / `x-force-*` headers (never cookies, `Authorization`, or a
 caller-supplied `x-field-auth`). Responses are buffered; requests time out after 30 s.
 
@@ -17,14 +17,14 @@ fingerprints you need to verify anything it produced off-box.
    the longest token you will mint, and an optional spend ceiling. Until at least one scope is
    saved, your row is left off the estate's roster and no token can be minted under your name.
 2. **Anthropic key** (only for governed LLM calls): place your own key on the dashboard. It is set
-   as a secret on your estate and never stored by the portal.
+   as a secret on your estate and never stored by the console.
 3. **API key**: create one on the dashboard. Rate limits are per tier (see the pricing table).
 
 Set these for the examples:
 
 ```sh
-export FF=https://force-field-portal.netlify.app/api/v1
-export FF_KEY=ff_live_...            # your portal API key
+export FF=https://force-field-console.netlify.app/api/v1
+export FF_KEY=ff_live_...            # your console API key
 export ME=you@example.com            # your account email = your grantor / owner string
 ```
 
@@ -112,7 +112,7 @@ curl -s "$FF/lifecycle/findings" -H "x-api-key: $FF_KEY"     # the daily sweep's
 The ledger's `key_fingerprint` must equal the `ledger-sign` fingerprint on your dashboard; it was
 generated inside your estate at bootstrap and the private key never leaves it.
 
-## What the portal does to your estate, and what it does not
+## What the console does to your estate, and what it does not
 
 - It **never** reads your ledger contents, your keys, or your Anthropic key.
 - A scheduled check every two minutes looks at `/ledger/health` and flags a problem on the

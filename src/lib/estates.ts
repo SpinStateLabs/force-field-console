@@ -1,4 +1,4 @@
-// Force-Field Portal — dedicated estates.
+// Force-Field Console — dedicated estates.
 //
 // One Fly.io app per paying account (`ff-est-<8 hex>`), created and armed by
 // a resumable state machine: every step is idempotent, short (one or two Fly
@@ -445,7 +445,7 @@ export async function advanceEstate(
       }
       case "set_base_secrets": {
         await fly.setSecrets(e.app, { FIELD_SHARED_SECRET: estateSecret(e.app) });
-        nextStep(e, "FIELD_SHARED_SECRET set (derived; not stored in the portal)", now);
+        nextStep(e, "FIELD_SHARED_SECRET set (derived; not stored in the console)", now);
         break;
       }
       case "create_machine": {
@@ -663,14 +663,14 @@ export async function armedPosture(origin: string, fetchImpl: FetchLike = fetch)
 }
 
 /**
- * The Fly app behind a ready estate is gone (destroyed outside the portal).
+ * The Fly app behind a ready estate is gone (destroyed outside the console).
  * The record becomes an honest error at step create_app with every
  * machine-bound fact cleared: the gateway answers 503 estate_error instead of
  * dialing a dead origin, and a retry provisions a FRESH estate (new keys, an
  * empty ledger) rather than pretending the old one is back.
  */
 export function markEstateAppMissing(e: Estate, now: Date = new Date()): void {
-  logEstate(e, "health", `Fly app ${e.app} no longer exists (destroyed outside the portal); retry provisions a fresh estate (new keys, empty ledger)`, now);
+  logEstate(e, "health", `Fly app ${e.app} no longer exists (destroyed outside the console); retry provisions a fresh estate (new keys, empty ledger)`, now);
   e.status = "error";
   e.error = "estate_app_missing: the Fly app behind this estate is gone";
   e.step = "create_app";

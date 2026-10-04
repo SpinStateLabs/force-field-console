@@ -459,7 +459,7 @@ describe("dedicated estates", () => {
     expect(e.app).toBe(cur.app);
   });
 
-  it("health check: a Fly app destroyed outside the portal becomes an honest error that a retry rebuilds from scratch", async () => {
+  it("health check: a Fly app destroyed outside the console becomes an honest error that a retry rebuilds from scratch", async () => {
     const fly = new FakeFly();
     await readyEstate(fly);
     fly.appExists = false;

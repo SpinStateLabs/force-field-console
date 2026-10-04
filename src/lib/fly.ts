@@ -1,4 +1,4 @@
-// Force-Field Portal — Fly.io client for dedicated-estate provisioning.
+// Force-Field Console — Fly.io client for dedicated-estate provisioning.
 //
 // Machines API (https://api.machines.dev/v1) for apps, volumes, machines and
 // in-machine exec; the GraphQL API (https://api.fly.io/graphql) for the two

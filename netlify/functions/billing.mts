@@ -1,4 +1,4 @@
-// billing.mts — Force-Field Portal v0.2.0
+// billing.mts — Force-Field Console v0.2.0
 // Stripe billing: Checkout Session creation, Customer Portal sessions, and the
 // signed webhook that is the only writer of paid tiers. Every endpoint answers
 // 501 billing_not_configured until the four STRIPE_* variables are set — never

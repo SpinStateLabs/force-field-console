@@ -85,7 +85,7 @@ describe("health capability flags", () => {
 
   it("reports billing and provisioning as configured only when their variables are all set", async () => {
     const off = await (await healthHandler(new Request("http://portal.test/api/health"), ctx)).json();
-    expect(off).toMatchObject({ ok: true, billing_configured: false, provisioning_configured: false, version: "0.2.1" });
+    expect(off).toMatchObject({ ok: true, billing_configured: false, provisioning_configured: false, store_scope: "deploy", version: "0.2.2" });
     Object.assign(process.env, FLY_ENV, { STRIPE_SECRET_KEY: "a", STRIPE_WEBHOOK_SECRET: "b", STRIPE_PRICE_OPERATOR: "c", STRIPE_PRICE_SOVEREIGN: "d", ESTATE_URL: "https://s" });
     const on = await (await healthHandler(new Request("http://portal.test/api/health"), ctx)).json();
     expect(on).toMatchObject({ estate_attached: true, billing_configured: true, provisioning_configured: true });

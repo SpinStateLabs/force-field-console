@@ -1,4 +1,4 @@
-// gateway.mts — Force-Field Portal v0.2.0
+// gateway.mts — Force-Field Console v0.2.0
 // Authenticated proxy from /api/v1/* to the engine estate (ONE reverse-proxy
 // origin fronting the field-platform services). Auth is ONLY the x-api-key
 // header. Responses are buffered — no streaming in v0.
@@ -65,7 +65,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       return err(
         503,
         "estate_not_attached",
-        "The sandbox estate is not attached yet. The portal is live; the governance engine endpoint will be attached shortly.",
+        "The sandbox estate is not attached yet. The console is live; the governance engine endpoint will be attached shortly.",
       );
     }
   }

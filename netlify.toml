@@ -1,4 +1,4 @@
-# Force-Field Portal — Netlify configuration
+# Force-Field Console — Netlify configuration
 [build]
   publish = "public"
 

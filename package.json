@@ -1,9 +1,9 @@
 {
-  "name": "force-field-portal",
-  "version": "0.2.1",
+  "name": "force-field-console",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
-  "description": "Force-Field Portal \u2014 public SaaS portal for the Force Field Protocol governance platform (Spin State Labs): accounts, API keys, Stripe billing, dedicated estates on Fly.io",
+  "description": "Force-Field Console \u2014 public SaaS console for the Force Field Protocol governance platform (Spin State Labs): accounts, API keys, Stripe billing, dedicated estates on Fly.io",
   "scripts": {
     "test": "vitest run",
     "dev": "netlify dev"

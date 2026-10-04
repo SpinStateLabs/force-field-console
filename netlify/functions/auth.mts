@@ -1,4 +1,4 @@
-// auth.mts — Force-Field Portal v0.1.0
+// auth.mts — Force-Field Console v0.1.0
 // Registration, login, logout. Session is an HS256 JWT in the ff_session cookie.
 // Never log emails, passwords, or tokens.
 import type { Context, Config } from "@netlify/functions";

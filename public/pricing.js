@@ -1,4 +1,4 @@
-// Force-Field Portal — landing page: the pricing note is rendered from the
+// Force-Field Console — landing page: the pricing note is rendered from the
 // deployment's capability flags (/api/health) so the copy never claims more
 // than this deployment is configured to do. The static default (in the HTML)
 // is the most conservative statement; JS only ever upgrades it when the

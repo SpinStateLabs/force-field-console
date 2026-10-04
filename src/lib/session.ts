@@ -1,4 +1,4 @@
-// Force-Field Portal — browser sessions.
+// Force-Field Console — browser sessions.
 //
 // Sessions are HS256 JWTs in an HttpOnly cookie (ff_session), 7-day expiry.
 // Known limit (documented in the README): JWTs are stateless, so a session

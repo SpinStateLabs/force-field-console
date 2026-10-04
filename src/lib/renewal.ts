@@ -1,4 +1,4 @@
-// Force-Field Portal — self-agent token renewal for dedicated estates.
+// Force-Field Console — self-agent token renewal for dedicated estates.
 //
 // Each estate carries three platform identities (conformance-sentinel,
 // force-gateway, compliance-crosswalk) whose delegation tokens are minted for

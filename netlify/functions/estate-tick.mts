@@ -1,4 +1,4 @@
-// estate-tick.mts — Force-Field Portal v0.2.0
+// estate-tick.mts — Force-Field Console v0.2.0
 // Scheduled backstop (every two minutes, 30-second limit): kick the background
 // worker for every estate that is still provisioning and has no live worker,
 // and for every ready estate whose self-agent tokens are due for renewal. The

@@ -1,4 +1,4 @@
-// Force-Field Portal — dashboard client (vanilla ES module).
+// Force-Field Console — dashboard client (vanilla ES module).
 // All user-derived strings are rendered via textContent / createElement —
 // never innerHTML with data. Secrets typed here (the Anthropic key) go
 // straight to the API and are cleared from the form; nothing is kept.
@@ -41,7 +41,7 @@ function errMessage(status, data) {
   if (data && data.error && typeof data.error.message === "string" && data.error.message) {
     return data.error.message;
   }
-  if (status === 0) return "Network error — the portal could not be reached.";
+  if (status === 0) return "Network error — the console could not be reached.";
   if (status === 503) return "Service unavailable (503).";
   if (status === 501) return "Not configured on this deployment (501).";
   return "Request failed (HTTP " + status + ").";
@@ -482,7 +482,7 @@ async function submitAnthropicKey(ev) {
   input.value = "";
   btn.disabled = false;
   if (res.status === 200) {
-    $("anthropic-status").textContent = "Key placed " + fmtTime(res.data && res.data.anthropic_key_set_at) + ". The estate is restarting to apply it; the portal did not keep a copy.";
+    $("anthropic-status").textContent = "Key placed " + fmtTime(res.data && res.data.anthropic_key_set_at) + ". The estate is restarting to apply it; the console did not keep a copy.";
     loadEstate();
   } else if (res.status === 401) {
     showAuthView();

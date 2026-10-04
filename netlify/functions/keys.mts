@@ -1,4 +1,4 @@
-// keys.mts — Force-Field Portal v0.1.0
+// keys.mts — Force-Field Console v0.1.0
 // API key management. The plaintext key is returned exactly ONCE at creation;
 // only its sha256 hash is stored. Never log plaintext keys.
 import type { Context, Config } from "@netlify/functions";

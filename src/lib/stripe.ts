@@ -1,4 +1,4 @@
-// Force-Field Portal — Stripe billing client.
+// Force-Field Console — Stripe billing client.
 //
 // Plain REST over fetch (form-encoded requests, JSON responses); no SDK, so
 // every call is mockable with a stubbed fetch and nothing is bundled that the

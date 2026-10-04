@@ -225,7 +225,7 @@ describe("billing endpoints", () => {
 
   it("checkout: validates the tier, refuses a second subscription, and returns Stripe's URL", async () => {
     Object.assign(process.env, STRIPE_ENV);
-    process.env.URL = "https://force-field-portal.netlify.app";
+    process.env.URL = "https://force-field-console.netlify.app";
     const cookie = await cookieFor(user);
     const bad = await handler(new Request("http://portal.test/api/billing/checkout", { method: "POST", headers: { cookie }, body: JSON.stringify({ tier: "gold" }) }), ctx);
     expect(bad.status).toBe(400);
@@ -241,7 +241,7 @@ describe("billing endpoints", () => {
       expect(ok.status).toBe(200);
       expect((await ok.json()).url).toBe("https://checkout.stripe.com/c/cs_1");
       const p = new URLSearchParams(seen);
-      expect(p.get("success_url")).toBe("https://force-field-portal.netlify.app/app.html?checkout=success");
+      expect(p.get("success_url")).toBe("https://force-field-console.netlify.app/app.html?checkout=success");
       expect(p.get("client_reference_id")).toBe(user.id);
     } finally {
       globalThis.fetch = realFetch;
