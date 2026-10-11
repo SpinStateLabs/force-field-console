@@ -1,6 +1,6 @@
 # Force-Field Console
 
-**Force Field Protocol** governance platform by Spin State Labs
+**Force-Field Protocol** governance platform by Spin State Labs
 ("Force-Field as a Service", v0.2.2).
 
 > Renamed 2026-10-04: formerly Force-Field Portal (`force-field-portal`, then
@@ -11,7 +11,7 @@
 The console provides user registration/login, API key management, tiered rate limits, Stripe
 billing for the paid tiers, automatic provisioning of one dedicated engine estate per paying
 account on Fly.io, and an authenticated API gateway that proxies `/api/v1/*` to the caller's
-estate (a Force Field Protocol engine: thirteen FastAPI services behind one reverse-proxy origin
+estate (a Force-Field Protocol engine: thirteen FastAPI services behind one reverse-proxy origin
 with path prefixes such as `/registry`, `/ledger`, `/delegation`, `/sentinel`, `/killswitch`,
 `/governor`, `/replay`, `/gateway`, `/federation`, `/lifecycle`, `/attest`, `/crosswalk`).
 

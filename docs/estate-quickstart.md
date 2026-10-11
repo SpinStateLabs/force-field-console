@@ -6,7 +6,7 @@ your console API key in `x-api-key`. The gateway strips `/api/v1`, adds the esta
 secret, and forwards your `x-field-*` / `x-force-*` headers (never cookies, `Authorization`, or a
 caller-supplied `x-field-auth`). Responses are buffered; requests time out after 30 s.
 
-The estate is a Force Field Protocol engine: thirteen services behind one origin, in the armed
+The estate is a Force-Field Protocol engine: thirteen services behind one origin, in the armed
 posture (per-event ledger signing required, served attestations signed, gateway enforcement with
 tool checks, and a delegation roster that gates every mint). The dashboard shows the public keys and
 fingerprints you need to verify anything it produced off-box.
