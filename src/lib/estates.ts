@@ -48,6 +48,8 @@ export type RosterRow = {
 /** The scheduled tick's last look at a ready estate: never a trigger for destruction, only a flag. */
 export type EstateHealth = { ok: boolean; checked_at: string; note: string };
 
+export type SuspendPending = { reason: string; since: string; attempts: number; last_error: string };
+
 export type Estate = {
   user_id: string;
   app: string;
@@ -75,6 +77,12 @@ export type Estate = {
   /** An image that failed to reach the armed posture on this estate; the tick will not retry it. */
   upgrade_failed_image: string | null;
   suspended_from: EstateStatus | null;
+  /**
+   * A suspension that was decided but whose machine stop failed. The estate is NOT
+   * marked suspended (the machine is still running and billing), the gateway refuses
+   * it meanwhile, and the scheduled tick retries the stop until it succeeds.
+   */
+  suspend_pending?: SuspendPending | null;
   lease_until: string | null;
   worker_until: string | null;
   created_at: string;
@@ -117,11 +125,70 @@ export async function getEstate(userId: string): Promise<Estate | null> {
   return ((await store.get(estateKey(userId), { type: "json" })) as Estate | null) ?? null;
 }
 
-export async function saveEstate(e: Estate, now: Date = new Date()): Promise<void> {
+/**
+ * Write the estate record. NOT a blind write: the stored record is re-read with its
+ * etag, merged under the rules below and written conditionally (retried on a lost
+ * race), so two writers of one record cannot silently undo each other.
+ *
+ * - Default (a worker or any step driver holding a possibly stale copy): SUSPEND
+ *   WINS. If the stored record is suspended, or has a suspension pending, the
+ *   caller's progress fields are kept but the suspension fields come from the
+ *   store, and the caller's object is updated to match.
+ * - `authoritative` (suspend / resume / clearing a pending suspension: the writers
+ *   that decide the suspension state): the caller's suspension fields win, while
+ *   the machine / volume / step facts a worker may have saved meanwhile are kept.
+ */
+export async function saveEstate(e: Estate, now: Date = new Date(), opts: { authoritative?: boolean } = {}): Promise<void> {
   e.updated_at = now.toISOString();
   if (e.log.length > MAX_LOG) e.log = e.log.slice(e.log.length - MAX_LOG);
   const store = await portalStore();
-  await store.setJSON(estateKey(e.user_id), e);
+  const key = estateKey(e.user_id);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const read = await store.getWithEtag(key);
+    const cur = read?.data as Estate | undefined;
+    let out: Estate = e;
+    if (cur) out = opts.authoritative ? mergeAuthoritative(cur, e) : mergeSuspendWins(cur, e);
+    const ok = read ? await store.setJSONIfMatch(key, out, read.etag) : await store.setJSONIfNew(key, out);
+    if (ok) {
+      if (out !== e) Object.assign(e, out);
+      return;
+    }
+  }
+  throw new EstateError(409, "estate_write_conflict", "The estate record kept changing underneath this write; try again.");
+}
+
+const SUSPENSION_FIELDS = ["status", "suspended_from", "suspended_at", "suspend_pending", "health", "lease_until"] as const;
+
+function mergeSuspendWins(cur: Estate, mine: Estate): Estate {
+  const suspended = cur.status === "suspended";
+  const pending = Boolean(cur.suspend_pending);
+  if (!suspended && !pending) return mine;
+  const out: Estate = { ...mine };
+  if (suspended) {
+    out.status = "suspended";
+    out.suspended_at = cur.suspended_at;
+    // The worker may have advanced the record (e.g. to ready) before the suspension landed.
+    out.suspended_from = mine.status !== "suspended" && mine.status !== "pending_manual" ? mine.status : cur.suspended_from;
+    out.lease_until = null;
+  }
+  if (pending && !mine.suspend_pending) {
+    out.suspend_pending = cur.suspend_pending;
+    out.health = cur.health;
+  }
+  return out;
+}
+
+function mergeAuthoritative(cur: Estate, mine: Estate): Estate {
+  const out: Estate = { ...cur };
+  for (const f of SUSPENSION_FIELDS) (out as any)[f] = (mine as any)[f] ?? null;
+  // A suspension records the status the record had when it landed: the stored one, not a stale copy's.
+  if (mine.status === "suspended" && cur.status !== "suspended") out.suspended_from = cur.status;
+  else if (mine.status === "suspended") out.suspended_from = cur.suspended_from;
+  const seen = new Set(mine.log.map((l) => l.at + "|" + l.step + "|" + l.note));
+  out.log = [...mine.log, ...cur.log.filter((l) => !seen.has(l.at + "|" + l.step + "|" + l.note))].sort((a, b) => a.at.localeCompare(b.at));
+  if (out.log.length > MAX_LOG) out.log = out.log.slice(out.log.length - MAX_LOG);
+  out.updated_at = mine.updated_at;
+  return out;
 }
 
 export async function listEstates(): Promise<Estate[]> {
@@ -188,6 +255,7 @@ export async function queueEstate(user: User, now: Date = new Date()): Promise<E
     health: null,
     upgrade_failed_image: null,
     suspended_from: null,
+    suspend_pending: null,
     lease_until: null,
     worker_until: null,
     created_at: now.toISOString(),
@@ -401,6 +469,7 @@ export async function advanceEstate(
     await saveEstate(e, now);
   }
   if (e.status !== "provisioning") return { estate: e, outcome: "idle", note: `estate is ${e.status}` };
+  if (e.suspend_pending) return { estate: e, outcome: "idle", note: "a suspension is pending; not provisioning further" };
   if (!fly || !cfg) return { estate: e, outcome: "idle", note: "provisioning is not configured on this deployment" };
   if (e.lease_until && new Date(e.lease_until).getTime() > now.getTime()) {
     return { estate: e, outcome: "waiting", note: "another driver holds the step lease" };
@@ -577,7 +646,16 @@ export async function suspendEstate(e: Estate, fly: FlyClient | null, now: Date 
       await fly.stopMachine(e.app, e.machine_id);
       logEstate(e, "suspend", `machine ${e.machine_id} stopped: ${reason}`, now);
     } catch (err: any) {
-      logEstate(e, "suspend", `stop failed (${String(err?.message ?? err).slice(0, 200)}); marked suspended anyway — gateway refuses`, now);
+      // The machine may still be running (and billing): do NOT mark the estate suspended.
+      // Record the pending suspension; the gateway refuses meanwhile, health flags it,
+      // and the scheduled tick retries the stop (suspendEstate again) until it succeeds.
+      const msg = String(err?.message ?? err).slice(0, 200);
+      const prior = e.suspend_pending;
+      e.suspend_pending = { reason, since: prior?.since ?? now.toISOString(), attempts: (prior?.attempts ?? 0) + 1, last_error: msg };
+      e.health = { ok: false, checked_at: now.toISOString(), note: `suspend pending: machine stop failed (${msg}); retrying` };
+      logEstate(e, "suspend", `stop failed (${msg}); suspension pending (attempt ${e.suspend_pending.attempts}), machine may still be running — gateway refuses, tick retries`, now);
+      await saveEstate(e, now, { authoritative: true });
+      return e;
     }
   } else {
     logEstate(e, "suspend", `marked suspended: ${reason}` + (fly ? "" : " (provisioning not configured; no machine to stop)"), now);
@@ -585,8 +663,19 @@ export async function suspendEstate(e: Estate, fly: FlyClient | null, now: Date 
   e.suspended_from = e.status;
   e.status = "suspended";
   e.suspended_at = now.toISOString();
+  e.suspend_pending = null;
   e.lease_until = null;
-  await saveEstate(e, now);
+  await saveEstate(e, now, { authoritative: true });
+  return e;
+}
+
+/** A pending suspension is moot (the subscription is active again): drop it; the machine was never stopped. */
+export async function clearSuspendPending(e: Estate, why: string, now: Date = new Date()): Promise<Estate> {
+  if (!e.suspend_pending) return e;
+  e.suspend_pending = null;
+  if (e.health && !e.health.ok && /^suspend pending/.test(e.health.note)) e.health = null;
+  logEstate(e, "suspend", `pending suspension cleared: ${why}`, now);
+  await saveEstate(e, now, { authoritative: true });
   return e;
 }
 
@@ -603,7 +692,8 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
   if (e.status === "suspended") e.status = "ready";
   e.suspended_from = null;
   e.suspended_at = null;
-  await saveEstate(e, now);
+  e.suspend_pending = null;
+  await saveEstate(e, now, { authoritative: true });
   return e;
 }
 
@@ -706,6 +796,7 @@ export async function checkEstateHealth(
   const now = opts.now ?? new Date();
   const fetchImpl = opts.fetchImpl ?? fetch;
   if (e.status !== "ready") return "skipped";
+  if (e.suspend_pending) return "skipped"; // health is already flagged; the tick retries the stop
   const app = await fly.getApp(e.app, 8000);
   if (!app) {
     markEstateAppMissing(e, now);
@@ -799,8 +890,8 @@ export type Route =
 
 export function resolveRoute(user: User, estate: Estate | null): Route {
   if (!estate || estate.status === "pending_manual") return { kind: "sandbox" };
-  if (estate.status === "ready" && estate.url) return { kind: "estate", url: estate.url, secret: estateSecret(estate.app) };
-  if (estate.status === "suspended") {
+  if (estate.status === "ready" && estate.url && !estate.suspend_pending) return { kind: "estate", url: estate.url, secret: estateSecret(estate.app) };
+  if (estate.status === "suspended" || estate.suspend_pending) {
     return { kind: "refuse", status: 403, code: "estate_suspended", message: "Your dedicated estate is suspended (subscription not active). Its data is kept; reactivate billing to resume." };
   }
   if (estate.status === "error") {
@@ -842,6 +933,7 @@ export function publicEstate(e: Estate, now: Date = new Date()): Record<string, 
     updated_at: e.updated_at,
     ready_at: e.ready_at,
     suspended_at: e.suspended_at,
+    suspend_pending: e.suspend_pending ?? null,
     log: e.log.slice(-20),
   };
 }
