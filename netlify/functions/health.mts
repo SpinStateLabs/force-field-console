@@ -8,6 +8,7 @@ import type { Context, Config } from "@netlify/functions";
 import { env, storeScope } from "../../src/lib/store";
 import { stripeConfig } from "../../src/lib/stripe";
 import { flyConfig } from "../../src/lib/fly";
+import { listEstates } from "../../src/lib/estates";
 
 export const PORTAL_VERSION = "0.2.2";
 
@@ -19,9 +20,18 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     );
   }
 
+  // Estates whose suspension could not be completed (the machine still runs): a count only, null when unreadable.
+  let suspendFailed: number | null = null;
+  try {
+    suspendFailed = (await listEstates()).filter((e) => e.suspend_pending?.failed).length;
+  } catch {
+    suspendFailed = null;
+  }
+
   return new Response(
     JSON.stringify({
       ok: true,
+      suspend_failed_estates: suspendFailed,
       estate_attached: Boolean(env("ESTATE_URL")),
       billing_configured: stripeConfig() !== null,
       provisioning_configured: flyConfig() !== null,

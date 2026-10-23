@@ -117,6 +117,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
           tier,
           success_url: origin + "/app.html?checkout=success",
           cancel_url: origin + "/app.html?checkout=cancelled",
+          idempotency_key: "checkout-" + claim,
         });
         return json(200, { url: session.url });
       } catch (e) {

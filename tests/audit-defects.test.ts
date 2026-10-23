@@ -146,7 +146,7 @@ describe("defect 2: a failed stop never marks the estate suspended", () => {
     await readyEstateFor(user);
     const failing = new StopFly();
     failing.stopFails = true;
-    await suspendEstate((await getEstate(user.id))!, failing as any, new Date(), "subscription canceled");
+    await suspendEstate((await getEstate(user.id))!, failing as any, new Date(Date.now() - 3_600_000), "subscription canceled"); // an hour ago: the retry backoff has elapsed
 
     const stops: string[] = [];
     const realFetch = globalThis.fetch;

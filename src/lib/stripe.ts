@@ -72,8 +72,10 @@ export async function stripeRequest(
   path: string,
   params?: Record<string, string | number | boolean | undefined>,
   fetchImpl: FetchLike = fetch,
+  idempotencyKey?: string,
 ): Promise<any> {
   const headers: Record<string, string> = { authorization: `Bearer ${cfg.secret_key}` };
+  if (idempotencyKey && method === "POST") headers["idempotency-key"] = idempotencyKey;
   let body: string | undefined;
   if (method === "POST") {
     headers["content-type"] = "application/x-www-form-urlencoded";
@@ -110,6 +112,8 @@ export type CheckoutArgs = {
   tier: PaidTier;
   success_url: string;
   cancel_url: string;
+  /** Stripe Idempotency-Key for the session creation (derived from the checkout claim token). */
+  idempotency_key?: string;
 };
 
 /** Create a subscription Checkout Session; returns its hosted URL. */
@@ -132,7 +136,7 @@ export async function createCheckoutSession(
   };
   if (args.customer_id) params.customer = args.customer_id;
   else params.customer_email = args.email;
-  const session = await stripeRequest(cfg, "POST", "/v1/checkout/sessions", params, fetchImpl);
+  const session = await stripeRequest(cfg, "POST", "/v1/checkout/sessions", params, fetchImpl, args.idempotency_key);
   if (!session?.url || !session?.id) {
     throw new StripeError(502, "stripe_bad_response", "Stripe returned a Checkout Session without a URL.");
   }

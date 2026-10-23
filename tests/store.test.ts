@@ -71,6 +71,13 @@ describe("portalStore (production adapter)", () => {
     expect(setJSON).toHaveBeenLastCalledWith("k", { a: 3 });
   });
 
+  it("a stored value that comes back without an etag is a hard error, never 'absent'", async () => {
+    process.env.CONTEXT = "production";
+    const store = await portalStore();
+    getWithMetadata.mockResolvedValueOnce({ data: { a: 1 }, etag: undefined, metadata: {} });
+    await expect(store.getWithEtag("k")).rejects.toThrow(/etag/);
+  });
+
   it("getWithEtag / setJSONIfMatch map to getWithMetadata and an onlyIfMatch write", async () => {
     process.env.CONTEXT = "production";
     const store = await portalStore();

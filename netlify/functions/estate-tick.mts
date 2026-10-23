@@ -24,13 +24,15 @@ export default async (_req: Request): Promise<Response> => {
   const now = new Date();
   const estates = await listEstates();
   const stuckSuspends = estates.filter((e) => e.suspend_pending && e.status !== "suspended");
+  const failedSuspends = stuckSuspends.filter((e) => e.suspend_pending!.failed).length;
+  const dueSuspends = stuckSuspends.filter((e) => !e.suspend_pending!.failed && (!e.suspend_pending!.next_retry_at || new Date(e.suspend_pending!.next_retry_at).getTime() <= now.getTime()));
   const pending = estates.filter((e) => (e.status === "provisioning" || e.status === "pending_manual") && !e.suspend_pending && !workerActive(e, now));
   const due = estates.filter((e) => renewalDue(e, now) && !e.suspend_pending);
   const outcomes: Record<string, number> = {};
   const bump = (k: string) => { outcomes[k] = (outcomes[k] ?? 0) + 1; };
 
   // A suspension whose machine stop failed is retried first: the machine may still be billing.
-  for (const e of stuckSuspends) {
+  for (const e of dueSuspends) {
     if (Date.now() - started > BUDGET_MS) break;
     try {
       const r = await suspendEstate(e, fly, now, e.suspend_pending?.reason ?? "suspension retry");
@@ -84,7 +86,7 @@ export default async (_req: Request): Promise<Response> => {
   }
 
   console.log(`estate-tick: suspend-pending ${stuckSuspends.length}, pending ${pending.length}, renewals due ${due.length}, ready ${ready.length}, drifted ${drifted.length}, outcomes ${JSON.stringify(outcomes)}`);
-  return new Response(JSON.stringify({ ok: true, suspend_pending: stuckSuspends.length, pending: pending.length, renewals_due: due.length, ready: ready.length, drifted: drifted.length, outcomes }), { status: 200 });
+  return new Response(JSON.stringify({ ok: true, suspend_pending: stuckSuspends.length, suspend_failed: failedSuspends, pending: pending.length, renewals_due: due.length, ready: ready.length, drifted: drifted.length, outcomes }), { status: 200 });
 };
 
 export const config: Config = {

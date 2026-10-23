@@ -90,7 +90,11 @@ export async function portalStore(): Promise<KV> {
     setJSONIfNew: async (key, value) => (await store.setJSON(key, value, { onlyIfNew: true })).modified,
     getWithEtag: async (key) => {
       const r = await store.getWithMetadata(key, { type: "json" });
-      return r && r.etag ? { data: r.data, etag: r.etag } : null;
+      if (!r) return null;
+      // A value without an etag must never read as "absent": callers would then try a
+      // create-only write that fails forever. Fail loudly instead.
+      if (!r.etag) throw new Error(`blob store returned "${key}" without an etag; conditional writes are unavailable`);
+      return { data: r.data, etag: r.etag };
     },
     setJSONIfMatch: async (key, value, etag) => (await store.setJSON(key, value, { onlyIfMatch: etag })).modified,
     delete: (key) => store.delete(key),

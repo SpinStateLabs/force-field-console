@@ -67,34 +67,67 @@ export async function claimEvent(eventId: string, type: string, now: Date = new 
 
 /**
  * Per-subscription ordering. Stripe does not guarantee delivery order, and a late
- * 'active' that arrives after 'deleted' must not resume a cancelled estate. The
- * high-water mark is the newest event.created (unix seconds) applied for a
- * subscription; an older event is stale and ignored. In the same second a recorded
- * cancellation wins (a cancelled subscription is final in Stripe). Events without a
- * numeric `created` (never from Stripe) are applied unordered.
+ * 'active' that arrives after 'deleted' must not resume a cancelled estate.
+ *
+ * Two parts, both required:
+ *  1. a HIGH-WATER MARK (newest event.created applied for the subscription) advanced
+ *     by an etag-conditional compare-and-set BEFORE anything is applied; an event
+ *     older than the mark is stale and ignored, and in the same second a recorded
+ *     cancellation wins (a cancelled subscription is final in Stripe). A redelivery of
+ *     the very event that set the mark (its apply failed) is not stale.
+ *  2. a short per-subscription lock held across mark + apply, so two events for one
+ *     subscription can never apply concurrently in arbitrary order. A delivery that
+ *     cannot get the lock waits briefly, then fails (5xx) and Stripe redelivers it.
+ *
+ * Events without a numeric `created` (never from Stripe) are applied unordered.
  */
 export type SubMark = { created: number; status: string; event_id: string };
 
-export async function isStaleSubscriptionEvent(subId: string, created: unknown): Promise<boolean> {
-  if (typeof created !== "number") return false;
-  const store = await portalStore();
-  const mark = (await store.get("stripe_subs/" + subId, { type: "json" })) as SubMark | null;
-  if (!mark) return false;
-  if (created < mark.created) return true;
-  return created === mark.created && mark.status === "canceled";
-}
-
-export async function recordSubscriptionEvent(subId: string, created: unknown, status: string, eventId: string): Promise<void> {
-  if (typeof created !== "number") return;
+export async function advanceSubscriptionMark(subId: string, created: unknown, status: string, eventId: string): Promise<boolean> {
+  if (typeof created !== "number") return true;
   const store = await portalStore();
   const key = "stripe_subs/" + subId;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 8; i++) {
     const read = await store.getWithEtag(key);
     const mark = read?.data as SubMark | undefined;
-    if (mark && mark.created > created) return; // a newer event already advanced the mark
+    if (mark && mark.event_id !== eventId) {
+      if (created < mark.created) return false;
+      if (created === mark.created && mark.status === "canceled") return false;
+    }
     const next: SubMark = { created, status, event_id: eventId };
-    if (read ? await store.setJSONIfMatch(key, next, read.etag) : await store.setJSONIfNew(key, next)) return;
+    if (read ? await store.setJSONIfMatch(key, next, read.etag) : await store.setJSONIfNew(key, next)) return true;
   }
+  throw new Error("subscription mark kept changing; the event will be redelivered");
+}
+
+export const SUB_LOCK_TTL_MS = 60_000;
+export const SUB_LOCK_TRIES = 30;
+export const SUB_LOCK_WAIT_MS = 100;
+
+export async function withSubscriptionLock<T>(subId: string, fn: () => Promise<T>): Promise<T> {
+  const store = await portalStore();
+  const key = "stripe_sub_locks/" + subId;
+  const token = randomUUID();
+  for (let i = 0; i < SUB_LOCK_TRIES; i++) {
+    const now = Date.now();
+    const lock = { token, expires_at: new Date(now + SUB_LOCK_TTL_MS).toISOString() };
+    let got = await store.setJSONIfNew(key, lock);
+    if (!got) {
+      const read = await store.getWithEtag(key);
+      if (read && new Date(read.data?.expires_at ?? 0).getTime() <= now) got = await store.setJSONIfMatch(key, lock, read.etag); // expired: conditional takeover
+      else if (!read) got = await store.setJSONIfNew(key, lock);
+    }
+    if (got) {
+      try {
+        return await fn();
+      } finally {
+        const cur = await store.getWithEtag(key).catch(() => null);
+        if (cur?.data?.token === token) await store.delete(key).catch(() => {});
+      }
+    }
+    await new Promise((r) => setTimeout(r, SUB_LOCK_WAIT_MS));
+  }
+  throw new Error("subscription " + subId + " is busy; the event will be redelivered");
 }
 
 export async function releaseEvent(eventId: string): Promise<void> {
@@ -131,6 +164,8 @@ export async function releaseCheckout(userId: string, token: string): Promise<vo
   const store = await portalStore();
   const key = "checkout_claims/" + userId;
   const read = await store.getWithEtag(key);
+  // Blobs has no conditional delete: the token check narrows the window to read-to-delete.
+  // Losing it only drops a claim early; the subscribed-check and the Stripe idempotency key bound the harm.
   if (read?.data?.token === token) await store.delete(key); // only our own claim
 }
 
@@ -185,6 +220,15 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   return tier;
 }
 
+/** Win the subscription's ordering mark (under its lock), then apply; false when the event is stale. */
+async function applyOrdered(user: User, sub: StripeSubscription, event: any, deps: WebhookDeps): Promise<{ applied: boolean; tier?: Tier }> {
+  return withSubscriptionLock(sub.id, async () => {
+    if (!(await advanceSubscriptionMark(sub.id, event?.created, sub.status, String(event?.id ?? "")))) return { applied: false };
+    const fresh = (await getUserById(user.id)) ?? user; // the user may have changed while we waited for the lock
+    return { applied: true, tier: await applySubscription(fresh, sub, deps) };
+  });
+}
+
 /** Dispatch one verified Stripe event. Unknown types and unknown users are acknowledged, not retried. */
 export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<WebhookOutcome> {
   const type = String(event?.type ?? "");
@@ -199,21 +243,19 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
     if (!user) return { handled: false, note: "no portal user on the session" };
     const sub = await getSubscription(deps.cfg, String(obj.subscription), deps.fetchImpl);
     if (!sub.metadata?.user_id) sub.metadata = { ...(sub.metadata ?? {}), user_id: user.id };
-    const tier = await applySubscription(user, sub, deps);
-    return { handled: true, note: `checkout completed; tier ${tier}` };
+    const r = await applyOrdered(user, sub, event, deps);
+    if (!r.applied) return { handled: false, note: `stale checkout.session.completed for ${sub.id} ignored (out of order)` };
+    return { handled: true, note: `checkout completed; tier ${r.tier}` };
   }
 
   if (type === "customer.subscription.created" || type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
     const sub = obj as StripeSubscription;
     if (!sub?.id || !sub?.customer) return { handled: false, note: "subscription event without id/customer" };
     const user = await userForSubscription(sub);
-    if (await isStaleSubscriptionEvent(sub.id, event?.created)) {
-      return { handled: false, note: `stale ${type} for ${sub.id} ignored (out of order)` };
-    }
     if (!user) return { handled: false, note: "no portal user for the subscription" };
-    const tier = await applySubscription(user, sub, deps);
-    await recordSubscriptionEvent(sub.id, event?.created, sub.status, String(event?.id ?? ""));
-    return { handled: true, note: `${type}; status ${sub.status}; tier ${tier}` };
+    const r = await applyOrdered(user, sub, event, deps);
+    if (!r.applied) return { handled: false, note: `stale ${type} for ${sub.id} ignored (out of order)` };
+    return { handled: true, note: `${type}; status ${sub.status}; tier ${r.tier}` };
   }
 
   return { handled: false, note: `ignored event type ${type || "(none)"}` };

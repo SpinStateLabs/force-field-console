@@ -18,7 +18,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { env, portalStore } from "./store";
 import type { User } from "./users";
-import { estateMachineConfig, estateOrigin, flyConfig, type FetchLike, type FlyClient } from "./fly";
+import { FlyError, estateMachineConfig, estateOrigin, flyConfig, type FetchLike, type FlyClient } from "./fly";
 
 export type EstateStatus = "pending_manual" | "provisioning" | "ready" | "suspended" | "error";
 
@@ -48,7 +48,16 @@ export type RosterRow = {
 /** The scheduled tick's last look at a ready estate: never a trigger for destruction, only a flag. */
 export type EstateHealth = { ok: boolean; checked_at: string; note: string };
 
-export type SuspendPending = { reason: string; since: string; attempts: number; last_error: string };
+export type SuspendPending = {
+  reason: string;
+  since: string;
+  attempts: number;
+  /** Fixed generic text; the underlying error is only ever logged server-side. */
+  last_error: string;
+  next_retry_at: string | null;
+  /** Retries exhausted (MAX_SUSPEND_RETRIES): needs an operator; the tick stops retrying. */
+  failed: boolean;
+};
 
 export type Estate = {
   user_id: string;
@@ -134,11 +143,12 @@ export async function getEstate(userId: string): Promise<Estate | null> {
  *   WINS. If the stored record is suspended, or has a suspension pending, the
  *   caller's progress fields are kept but the suspension fields come from the
  *   store, and the caller's object is updated to match.
- * - `authoritative` (suspend / resume / clearing a pending suspension: the writers
- *   that decide the suspension state): the caller's suspension fields win, while
- *   the machine / volume / step facts a worker may have saved meanwhile are kept.
+ * - `owns` (suspend / resume / clearing a pending suspension: the writers that decide
+ *   the suspension state): ONLY the named fields are taken from the caller's copy;
+ *   everything else (status, lease, step, machine / volume facts a worker saved
+ *   meanwhile) stays as stored. The log is merged.
  */
-export async function saveEstate(e: Estate, now: Date = new Date(), opts: { authoritative?: boolean } = {}): Promise<void> {
+export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns?: readonly OwnedField[] } = {}): Promise<void> {
   e.updated_at = now.toISOString();
   if (e.log.length > MAX_LOG) e.log = e.log.slice(e.log.length - MAX_LOG);
   const store = await portalStore();
@@ -147,7 +157,7 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { auth
     const read = await store.getWithEtag(key);
     const cur = read?.data as Estate | undefined;
     let out: Estate = e;
-    if (cur) out = opts.authoritative ? mergeAuthoritative(cur, e) : mergeSuspendWins(cur, e);
+    if (cur) out = opts.owns ? mergeOwned(cur, e, opts.owns) : mergeSuspendWins(cur, e);
     const ok = read ? await store.setJSONIfMatch(key, out, read.etag) : await store.setJSONIfNew(key, out);
     if (ok) {
       if (out !== e) Object.assign(e, out);
@@ -157,7 +167,10 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { auth
   throw new EstateError(409, "estate_write_conflict", "The estate record kept changing underneath this write; try again.");
 }
 
-const SUSPENSION_FIELDS = ["status", "suspended_from", "suspended_at", "suspend_pending", "health", "lease_until"] as const;
+type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health";
+const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health"];
+const OWN_PENDING: readonly OwnedField[] = ["suspend_pending", "health"];
+const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending"];
 
 function mergeSuspendWins(cur: Estate, mine: Estate): Estate {
   const suspended = cur.status === "suspended";
@@ -178,12 +191,11 @@ function mergeSuspendWins(cur: Estate, mine: Estate): Estate {
   return out;
 }
 
-function mergeAuthoritative(cur: Estate, mine: Estate): Estate {
+function mergeOwned(cur: Estate, mine: Estate, owns: readonly OwnedField[]): Estate {
   const out: Estate = { ...cur };
-  for (const f of SUSPENSION_FIELDS) (out as any)[f] = (mine as any)[f] ?? null;
+  for (const f of owns) (out as any)[f] = (mine as any)[f] ?? null;
   // A suspension records the status the record had when it landed: the stored one, not a stale copy's.
-  if (mine.status === "suspended" && cur.status !== "suspended") out.suspended_from = cur.status;
-  else if (mine.status === "suspended") out.suspended_from = cur.suspended_from;
+  if (owns.includes("status") && mine.status === "suspended") out.suspended_from = cur.status !== "suspended" ? cur.status : cur.suspended_from;
   const seen = new Set(mine.log.map((l) => l.at + "|" + l.step + "|" + l.note));
   out.log = [...mine.log, ...cur.log.filter((l) => !seen.has(l.at + "|" + l.step + "|" + l.note))].sort((a, b) => a.at.localeCompare(b.at));
   if (out.log.length > MAX_LOG) out.log = out.log.slice(out.log.length - MAX_LOG);
@@ -638,7 +650,18 @@ export async function retryEstate(e: Estate, now: Date = new Date()): Promise<Es
   return e;
 }
 
-/** Stop the machine; keep the volume (no data is destroyed here). */
+export const MAX_SUSPEND_RETRIES = 10;
+const SUSPEND_BACKOFF_BASE_MS = 2 * 60_000;
+const SUSPEND_BACKOFF_MAX_MS = 60 * 60_000;
+const SUSPEND_ERR = "machine stop failed";
+
+/**
+ * Stop the machine; keep the volume (no data is destroyed here). A failed stop leaves the
+ * estate un-suspended with `suspend_pending` (retried by the tick with backoff, at most
+ * MAX_SUSPEND_RETRIES times, then `failed`). A Fly 404 means the machine is already gone:
+ * that counts as stopped. Error detail goes to the server log only; the record, health and
+ * log carry fixed generic text.
+ */
 export async function suspendEstate(e: Estate, fly: FlyClient | null, now: Date = new Date(), reason = "suspended"): Promise<Estate> {
   if (e.status === "suspended") return e;
   if (fly && e.machine_id) {
@@ -646,16 +669,34 @@ export async function suspendEstate(e: Estate, fly: FlyClient | null, now: Date 
       await fly.stopMachine(e.app, e.machine_id);
       logEstate(e, "suspend", `machine ${e.machine_id} stopped: ${reason}`, now);
     } catch (err: any) {
-      // The machine may still be running (and billing): do NOT mark the estate suspended.
-      // Record the pending suspension; the gateway refuses meanwhile, health flags it,
-      // and the scheduled tick retries the stop (suspendEstate again) until it succeeds.
-      const msg = String(err?.message ?? err).slice(0, 200);
-      const prior = e.suspend_pending;
-      e.suspend_pending = { reason, since: prior?.since ?? now.toISOString(), attempts: (prior?.attempts ?? 0) + 1, last_error: msg };
-      e.health = { ok: false, checked_at: now.toISOString(), note: `suspend pending: machine stop failed (${msg}); retrying` };
-      logEstate(e, "suspend", `stop failed (${msg}); suspension pending (attempt ${e.suspend_pending.attempts}), machine may still be running — gateway refuses, tick retries`, now);
-      await saveEstate(e, now, { authoritative: true });
-      return e;
+      if (err instanceof FlyError && err.status === 404) {
+        logEstate(e, "suspend", `machine ${e.machine_id} not found on Fly (already stopped or gone): ${reason}`, now);
+      } else {
+        // The machine may still be running (and billing): do NOT mark the estate suspended.
+        console.error("estate suspend: machine stop failed for", e.app, String(err?.message ?? err).slice(0, 300));
+        const prior = e.suspend_pending;
+        const attempts = (prior?.attempts ?? 0) + 1;
+        const failed = attempts >= MAX_SUSPEND_RETRIES;
+        const delay = Math.min(SUSPEND_BACKOFF_BASE_MS * 2 ** (attempts - 1), SUSPEND_BACKOFF_MAX_MS);
+        e.suspend_pending = {
+          reason,
+          since: prior?.since ?? now.toISOString(),
+          attempts,
+          last_error: SUSPEND_ERR,
+          next_retry_at: failed ? null : new Date(now.getTime() + delay).toISOString(),
+          failed,
+        };
+        e.health = {
+          ok: false,
+          checked_at: now.toISOString(),
+          note: failed
+            ? `suspend failed: the machine could not be stopped after ${attempts} attempts; operator action needed`
+            : `suspend pending: the machine could not be stopped yet (attempt ${attempts}); retrying`,
+        };
+        logEstate(e, "suspend", failed ? `${SUSPEND_ERR}; giving up after ${attempts} attempts (suspend failed) - gateway refuses` : `${SUSPEND_ERR} (attempt ${attempts}); suspension pending - gateway refuses, tick retries`, now);
+        await saveEstate(e, now, { owns: OWN_PENDING });
+        return e;
+      }
     }
   } else {
     logEstate(e, "suspend", `marked suspended: ${reason}` + (fly ? "" : " (provisioning not configured; no machine to stop)"), now);
@@ -664,8 +705,8 @@ export async function suspendEstate(e: Estate, fly: FlyClient | null, now: Date 
   e.status = "suspended";
   e.suspended_at = now.toISOString();
   e.suspend_pending = null;
-  e.lease_until = null;
-  await saveEstate(e, now, { authoritative: true });
+  if (e.health && /^suspend (pending|failed)/.test(e.health.note)) e.health = null;
+  await saveEstate(e, now, { owns: OWN_SUSPEND });
   return e;
 }
 
@@ -673,9 +714,9 @@ export async function suspendEstate(e: Estate, fly: FlyClient | null, now: Date 
 export async function clearSuspendPending(e: Estate, why: string, now: Date = new Date()): Promise<Estate> {
   if (!e.suspend_pending) return e;
   e.suspend_pending = null;
-  if (e.health && !e.health.ok && /^suspend pending/.test(e.health.note)) e.health = null;
+  if (e.health && !e.health.ok && /^suspend (pending|failed)/.test(e.health.note)) e.health = null;
   logEstate(e, "suspend", `pending suspension cleared: ${why}`, now);
-  await saveEstate(e, now, { authoritative: true });
+  await saveEstate(e, now, { owns: OWN_PENDING });
   return e;
 }
 
@@ -693,7 +734,7 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
   e.suspended_from = null;
   e.suspended_at = null;
   e.suspend_pending = null;
-  await saveEstate(e, now, { authoritative: true });
+  await saveEstate(e, now, { owns: OWN_RESUME });
   return e;
 }
 
