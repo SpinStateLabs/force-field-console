@@ -6,7 +6,7 @@
 // sandbox and suspends the estate (stopped, data kept — never destroyed here).
 // Every event id is recorded after successful handling so redeliveries are no-ops.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { portalStore } from "./store";
 import { getUserById, saveUser, type User, type Tier } from "./users";
 import {
@@ -19,7 +19,7 @@ import {
   type StripeConfig,
   type StripeSubscription,
 } from "./stripe";
-import { clearSuspendPending, getEstate, queueEstate, resumeEstate, suspendEstate } from "./estates";
+import { clearSuspendPending, getEstate, queueEstate, resumeEstate, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export type WebhookDeps = {
@@ -218,6 +218,44 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     }
   }
   return tier;
+}
+
+/**
+ * The tick's retry of a pending suspension. Runs under the same per-subscription lock as the
+ * webhook, re-reads the estate and the user's billing INSIDE it, and drops the retry when the
+ * subscription is paying again; the stop and its write are further conditional on the
+ * suspension still being pending in the stored record (see suspendEstate requirePending).
+ */
+export async function retryPendingSuspend(
+  userId: string,
+  fly: FlyClient,
+  now: Date = new Date(),
+): Promise<{ outcome: "suspended" | "pending" | "cleared"; estate: Estate | null }> {
+  const run = async () => {
+    const fresh = await getEstate(userId);
+    if (!fresh?.suspend_pending || fresh.status === "suspended") return { outcome: "cleared" as const, estate: fresh };
+    const u = await getUserById(userId);
+    if (u && u.tier !== "sandbox" && u.billing && GRANTING_STATUSES.has(u.billing.status)) {
+      await clearSuspendPending(fresh, "subscription is active again (checked by the tick before retrying)", now);
+      return { outcome: "cleared" as const, estate: fresh };
+    }
+    const r = await suspendEstate(fresh, fly, now, fresh.suspend_pending.reason, { requirePending: true });
+    const stored = (await getEstate(userId)) ?? r;
+    return { outcome: stored.status === "suspended" ? ("suspended" as const) : stored.suspend_pending ? ("pending" as const) : ("cleared" as const), estate: stored };
+  };
+  const user = await getUserById(userId);
+  const subId = user?.billing?.subscription_id;
+  return subId ? withSubscriptionLock(subId, run) : run();
+}
+
+/**
+ * Stripe Idempotency-Key for a checkout intent: stable across retries of the same
+ * (user, tier, customer) within one claim-TTL bucket, so a retried request replays the same
+ * Checkout Session instead of opening another; a new bucket is a new intent.
+ */
+export function checkoutIdempotencyKey(userId: string, tier: string, customerId: string | null, now: Date = new Date()): string {
+  const bucket = Math.floor(now.getTime() / CHECKOUT_CLAIM_TTL_MS);
+  return "checkout-" + createHash("sha256").update(`${userId}|${tier}|${customerId ?? ""}|${bucket}`).digest("hex").slice(0, 32);
 }
 
 /** Win the subscription's ordering mark (under its lock), then apply; false when the event is stale. */

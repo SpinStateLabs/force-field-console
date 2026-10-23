@@ -8,7 +8,9 @@
 // production deploy (never in previews). Logs counts only.
 import type { Config } from "@netlify/functions";
 import { flyClientOrNull, flyConfig } from "../../src/lib/fly";
-import { advanceEstate, checkEstateHealth, listEstates, suspendEstate, workerActive } from "../../src/lib/estates";
+import { advanceEstate, checkEstateHealth, listEstates, workerActive } from "../../src/lib/estates";
+import { retryPendingSuspend } from "../../src/lib/billing";
+import { portalStore } from "../../src/lib/store";
 import { renewalDue } from "../../src/lib/renewal";
 import { kickWorker } from "../../src/lib/worker";
 
@@ -31,16 +33,25 @@ export default async (_req: Request): Promise<Response> => {
   const outcomes: Record<string, number> = {};
   const bump = (k: string) => { outcomes[k] = (outcomes[k] ?? 0) + 1; };
 
+  let newlyFailed = 0;
   // A suspension whose machine stop failed is retried first: the machine may still be billing.
   for (const e of dueSuspends) {
     if (Date.now() - started > BUDGET_MS) break;
     try {
-      const r = await suspendEstate(e, fly, now, e.suspend_pending?.reason ?? "suspension retry");
-      bump(r.status === "suspended" ? "suspend_retry_ok" : "suspend_retry_failed");
+      const r = await retryPendingSuspend(e.user_id, fly, now);
+      bump(r.outcome === "suspended" ? "suspend_retry_ok" : r.outcome === "cleared" ? "suspend_retry_cleared" : "suspend_retry_failed");
+      if (r.estate?.suspend_pending?.failed && !e.suspend_pending!.failed) newlyFailed += 1;
     } catch (err: any) {
       bump("suspend_retry_threw");
       console.error("estate-tick: suspend retry threw for an estate:", String(err?.message ?? err).slice(0, 200));
     }
+  }
+
+  // One tiny counter record for the public health endpoint, so it never scans the estates itself.
+  try {
+    await (await portalStore()).setJSON("ops/suspend_failed", { count: failedSuspends + newlyFailed, at: now.toISOString() });
+  } catch (err: any) {
+    console.error("estate-tick: could not write the suspend-failed counter:", String(err?.message ?? err).slice(0, 200));
   }
 
   for (const e of pending) {
@@ -86,7 +97,7 @@ export default async (_req: Request): Promise<Response> => {
   }
 
   console.log(`estate-tick: suspend-pending ${stuckSuspends.length}, pending ${pending.length}, renewals due ${due.length}, ready ${ready.length}, drifted ${drifted.length}, outcomes ${JSON.stringify(outcomes)}`);
-  return new Response(JSON.stringify({ ok: true, suspend_pending: stuckSuspends.length, suspend_failed: failedSuspends, pending: pending.length, renewals_due: due.length, ready: ready.length, drifted: drifted.length, outcomes }), { status: 200 });
+  return new Response(JSON.stringify({ ok: true, suspend_pending: stuckSuspends.length, suspend_failed: failedSuspends + newlyFailed, pending: pending.length, renewals_due: due.length, ready: ready.length, drifted: drifted.length, outcomes }), { status: 200 });
 };
 
 export const config: Config = {

@@ -143,12 +143,14 @@ export async function getEstate(userId: string): Promise<Estate | null> {
  *   WINS. If the stored record is suspended, or has a suspension pending, the
  *   caller's progress fields are kept but the suspension fields come from the
  *   store, and the caller's object is updated to match.
+ * - `onlyIf`: checked against the STORED record on every attempt; when false nothing is
+ *   written and false is returned.
  * - `owns` (suspend / resume / clearing a pending suspension: the writers that decide
  *   the suspension state): ONLY the named fields are taken from the caller's copy;
  *   everything else (status, lease, step, machine / volume facts a worker saved
  *   meanwhile) stays as stored. The log is merged.
  */
-export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns?: readonly OwnedField[] } = {}): Promise<void> {
+export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns?: readonly OwnedField[]; onlyIf?: (stored: Estate) => boolean } = {}): Promise<boolean> {
   e.updated_at = now.toISOString();
   if (e.log.length > MAX_LOG) e.log = e.log.slice(e.log.length - MAX_LOG);
   const store = await portalStore();
@@ -156,18 +158,20 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
   for (let attempt = 0; attempt < 8; attempt++) {
     const read = await store.getWithEtag(key);
     const cur = read?.data as Estate | undefined;
+    // A write conditional on the STORED record (e.g. "the suspension is still pending"): skipped, not forced.
+    if (cur && opts.onlyIf && !opts.onlyIf(cur)) return false;
     let out: Estate = e;
     if (cur) out = opts.owns ? mergeOwned(cur, e, opts.owns) : mergeSuspendWins(cur, e);
     const ok = read ? await store.setJSONIfMatch(key, out, read.etag) : await store.setJSONIfNew(key, out);
     if (ok) {
       if (out !== e) Object.assign(e, out);
-      return;
+      return true;
     }
   }
   throw new EstateError(409, "estate_write_conflict", "The estate record kept changing underneath this write; try again.");
 }
 
-type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health";
+type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id";
 const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health"];
 const OWN_PENDING: readonly OwnedField[] = ["suspend_pending", "health"];
 const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending"];
@@ -661,52 +665,98 @@ const SUSPEND_ERR = "machine stop failed";
  * MAX_SUSPEND_RETRIES times, then `failed`). A Fly 404 means the machine is already gone:
  * that counts as stopped. Error detail goes to the server log only; the record, health and
  * log carry fixed generic text.
+ *
+ * A cancel that lands while the create_machine step may be in flight (no machine_id yet)
+ * cannot be marked suspended: the machine may appear a moment later. It is recorded as
+ * pending; the retry looks the machine up on Fly by name and stops it.
+ *
+ * `requirePending` (the tick's retry): every write is conditional on the suspension still
+ * being pending in the STORED record, so a reactivation that cleared it meanwhile is never
+ * overwritten (nor its flag revived by a failing retry).
  */
-export async function suspendEstate(e: Estate, fly: FlyClient | null, now: Date = new Date(), reason = "suspended"): Promise<Estate> {
+export async function suspendEstate(
+  e: Estate,
+  fly: FlyClient | null,
+  now: Date = new Date(),
+  reason = "suspended",
+  opts: { requirePending?: boolean } = {},
+): Promise<Estate> {
   if (e.status === "suspended") return e;
-  if (fly && e.machine_id) {
+  const onlyIf = opts.requirePending ? (cur: Estate) => Boolean(cur.suspend_pending) && cur.status !== "suspended" : undefined;
+  const flag = (failed: boolean, attempts: number, note: string, next: Date | null, prior: SuspendPending | null | undefined) => {
+    e.suspend_pending = {
+      reason,
+      since: prior?.since ?? now.toISOString(),
+      attempts,
+      last_error: SUSPEND_ERR,
+      next_retry_at: failed ? null : next ? next.toISOString() : null,
+      failed,
+    };
+    e.health = { ok: false, checked_at: now.toISOString(), note };
+  };
+
+  let machineId = e.machine_id;
+  let discovered = false;
+  if (fly && !machineId && e.status === "provisioning" && e.step === "create_machine") {
+    if (!e.suspend_pending) {
+      flag(false, 0, "suspend pending: machine creation was in flight; the machine will be stopped once it exists", new Date(now.getTime() + SUSPEND_BACKOFF_BASE_MS), null);
+      logEstate(e, "suspend", "cancel arrived while the machine was being created; suspension pending until the machine can be stopped", now);
+      await saveEstate(e, now, { owns: OWN_PENDING, onlyIf });
+      return e;
+    }
     try {
-      await fly.stopMachine(e.app, e.machine_id);
-      logEstate(e, "suspend", `machine ${e.machine_id} stopped: ${reason}`, now);
+      const found = (await fly.listMachines(e.app)).find((m) => m.name === "estate");
+      if (found) {
+        machineId = found.id;
+        discovered = true;
+      }
+    } catch (err: any) {
+      console.error("estate suspend: machine lookup failed for", e.app, String(err?.message ?? err).slice(0, 300));
+      return failStop(err);
+    }
+  }
+
+  function failStop(err: any): Promise<Estate> {
+    // The machine may still be running (and billing): do NOT mark the estate suspended.
+    console.error("estate suspend: machine stop failed for", e.app, String(err?.message ?? err).slice(0, 300));
+    const prior = e.suspend_pending;
+    const attempts = (prior?.attempts ?? 0) + 1;
+    const failed = attempts >= MAX_SUSPEND_RETRIES;
+    const delay = Math.min(SUSPEND_BACKOFF_BASE_MS * 2 ** (attempts - 1), SUSPEND_BACKOFF_MAX_MS);
+    flag(
+      failed,
+      attempts,
+      failed
+        ? `suspend failed: the machine could not be stopped after ${attempts} attempts; operator action needed`
+        : `suspend pending: the machine could not be stopped yet (attempt ${attempts}); retrying`,
+      new Date(now.getTime() + delay),
+      prior,
+    );
+    logEstate(e, "suspend", failed ? `${SUSPEND_ERR}; giving up after ${attempts} attempts (suspend failed) - gateway refuses` : `${SUSPEND_ERR} (attempt ${attempts}); suspension pending - gateway refuses, tick retries`, now);
+    return saveEstate(e, now, { owns: OWN_PENDING, onlyIf }).then(() => e);
+  }
+
+  if (fly && machineId) {
+    try {
+      await fly.stopMachine(e.app, machineId);
+      logEstate(e, "suspend", `machine ${machineId} stopped: ${reason}`, now);
     } catch (err: any) {
       if (err instanceof FlyError && err.status === 404) {
-        logEstate(e, "suspend", `machine ${e.machine_id} not found on Fly (already stopped or gone): ${reason}`, now);
+        logEstate(e, "suspend", `machine ${machineId} not found on Fly (already stopped or gone): ${reason}`, now);
       } else {
-        // The machine may still be running (and billing): do NOT mark the estate suspended.
-        console.error("estate suspend: machine stop failed for", e.app, String(err?.message ?? err).slice(0, 300));
-        const prior = e.suspend_pending;
-        const attempts = (prior?.attempts ?? 0) + 1;
-        const failed = attempts >= MAX_SUSPEND_RETRIES;
-        const delay = Math.min(SUSPEND_BACKOFF_BASE_MS * 2 ** (attempts - 1), SUSPEND_BACKOFF_MAX_MS);
-        e.suspend_pending = {
-          reason,
-          since: prior?.since ?? now.toISOString(),
-          attempts,
-          last_error: SUSPEND_ERR,
-          next_retry_at: failed ? null : new Date(now.getTime() + delay).toISOString(),
-          failed,
-        };
-        e.health = {
-          ok: false,
-          checked_at: now.toISOString(),
-          note: failed
-            ? `suspend failed: the machine could not be stopped after ${attempts} attempts; operator action needed`
-            : `suspend pending: the machine could not be stopped yet (attempt ${attempts}); retrying`,
-        };
-        logEstate(e, "suspend", failed ? `${SUSPEND_ERR}; giving up after ${attempts} attempts (suspend failed) - gateway refuses` : `${SUSPEND_ERR} (attempt ${attempts}); suspension pending - gateway refuses, tick retries`, now);
-        await saveEstate(e, now, { owns: OWN_PENDING });
-        return e;
+        return failStop(err);
       }
     }
   } else {
     logEstate(e, "suspend", `marked suspended: ${reason}` + (fly ? "" : " (provisioning not configured; no machine to stop)"), now);
   }
+  if (discovered) e.machine_id = machineId;
   e.suspended_from = e.status;
   e.status = "suspended";
   e.suspended_at = now.toISOString();
   e.suspend_pending = null;
   if (e.health && /^suspend (pending|failed)/.test(e.health.note)) e.health = null;
-  await saveEstate(e, now, { owns: OWN_SUSPEND });
+  await saveEstate(e, now, { owns: discovered ? [...OWN_SUSPEND, "machine_id"] : OWN_SUSPEND, onlyIf });
   return e;
 }
 

@@ -248,7 +248,7 @@ describe("MED 4/5: bounded, backed-off, sanitised suspend retries", () => {
 
       // surfaced in /api/health
       const h = await (await healthHandler(new Request("http://portal.test/api/health"), ctx)).json();
-      expect(h.suspend_failed_estates).toBe(1);
+      expect(h.suspend_failed).toBe(true);
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -277,7 +277,7 @@ describe("LOW 6: checkout session creation carries a Stripe idempotency key", ()
         ctx,
       );
       expect(res.status).toBe(200);
-      expect(key).toMatch(/^checkout-[0-9a-f-]{36}$/);
+      expect(key).toMatch(/^checkout-[0-9a-f]{32}$/);
     } finally {
       globalThis.fetch = realFetch;
       for (const k of Object.keys(STRIPE_ENV)) delete process.env[k];

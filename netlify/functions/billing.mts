@@ -16,7 +16,7 @@ import {
   stripeConfig,
   verifyStripeSignature,
 } from "../../src/lib/stripe";
-import { claimCheckout, claimEvent, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
+import { checkoutIdempotencyKey, claimCheckout, claimEvent, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
 import { flyClientOrNull } from "../../src/lib/fly";
 
 function json(status: number, body: unknown): Response {
@@ -117,7 +117,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
           tier,
           success_url: origin + "/app.html?checkout=success",
           cancel_url: origin + "/app.html?checkout=cancelled",
-          idempotency_key: "checkout-" + claim,
+          idempotency_key: checkoutIdempotencyKey(user.id, tier, user.billing?.customer_id ?? null),
         });
         return json(200, { url: session.url });
       } catch (e) {

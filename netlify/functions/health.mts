@@ -5,10 +5,9 @@
 // its honest note from these flags, so the copy can never claim more than the
 // deployment is configured for.
 import type { Context, Config } from "@netlify/functions";
-import { env, storeScope } from "../../src/lib/store";
+import { env, portalStore, storeScope } from "../../src/lib/store";
 import { stripeConfig } from "../../src/lib/stripe";
 import { flyConfig } from "../../src/lib/fly";
-import { listEstates } from "../../src/lib/estates";
 
 export const PORTAL_VERSION = "0.2.2";
 
@@ -20,10 +19,13 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     );
   }
 
-  // Estates whose suspension could not be completed (the machine still runs): a count only, null when unreadable.
-  let suspendFailed: number | null = null;
+  // Whether any estate's suspension could not be completed (a machine still runs). One small
+  // record kept by the scheduled tick; this unauthenticated endpoint never scans the estates and
+  // exposes a boolean only. null when unknown (no tick has run yet / unreadable).
+  let suspendFailed: boolean | null = null;
   try {
-    suspendFailed = (await listEstates()).filter((e) => e.suspend_pending?.failed).length;
+    const rec = (await (await portalStore()).get("ops/suspend_failed", { type: "json" })) as { count?: number } | null;
+    suspendFailed = rec ? Number(rec.count ?? 0) > 0 : null;
   } catch {
     suspendFailed = null;
   }
@@ -31,7 +33,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   return new Response(
     JSON.stringify({
       ok: true,
-      suspend_failed_estates: suspendFailed,
+      suspend_failed: suspendFailed,
       estate_attached: Boolean(env("ESTATE_URL")),
       billing_configured: stripeConfig() !== null,
       provisioning_configured: flyConfig() !== null,
