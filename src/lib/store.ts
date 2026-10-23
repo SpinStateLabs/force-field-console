@@ -14,6 +14,13 @@ export type KV = {
    * already existed — the caller then knows another writer got there first.
    */
   setJSONIfNew(key: string, value: any): Promise<boolean>;
+  /** Read a JSON value together with its etag (null when the key is absent). */
+  getWithEtag(key: string): Promise<{ data: any; etag: string } | null>;
+  /**
+   * Conditional write (the store's `onlyIfMatch`): true when the key still had
+   * `etag` and was overwritten, false when another writer changed it first.
+   */
+  setJSONIfMatch(key: string, value: any, etag: string): Promise<boolean>;
   delete(key: string): Promise<void>;
   list(opts?: { prefix?: string }): Promise<{ blobs: { key: string }[] }>;
 };
@@ -81,6 +88,15 @@ export async function portalStore(): Promise<KV> {
       await store.setJSON(key, value);
     },
     setJSONIfNew: async (key, value) => (await store.setJSON(key, value, { onlyIfNew: true })).modified,
+    getWithEtag: async (key) => {
+      const r = await store.getWithMetadata(key, { type: "json" });
+      if (!r) return null;
+      // A value without an etag must never read as "absent": callers would then try a
+      // create-only write that fails forever. Fail loudly instead.
+      if (!r.etag) throw new Error(`blob store returned "${key}" without an etag; conditional writes are unavailable`);
+      return { data: r.data, etag: r.etag };
+    },
+    setJSONIfMatch: async (key, value, etag) => (await store.setJSON(key, value, { onlyIfMatch: etag })).modified,
     delete: (key) => store.delete(key),
     list: (opts) => store.list(opts),
   };

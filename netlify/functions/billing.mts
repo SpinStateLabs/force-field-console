@@ -16,7 +16,7 @@ import {
   stripeConfig,
   verifyStripeSignature,
 } from "../../src/lib/stripe";
-import { claimEvent, handleStripeEvent, markProcessed, releaseEvent } from "../../src/lib/billing";
+import { checkoutIdempotencyKey, claimCheckout, claimEvent, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
 import { flyClientOrNull } from "../../src/lib/fly";
 
 function json(status: number, body: unknown): Response {
@@ -103,15 +103,28 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       if (user.billing?.subscription_id && GRANTING_STATUSES.has(user.billing.status)) {
         return err(409, "already_subscribed", "You already have a subscription; use Manage billing to change plans.");
       }
-      const session = await createCheckoutSession(cfg, {
-        user_id: user.id,
-        email: user.email,
-        customer_id: user.billing?.customer_id ?? null,
-        tier,
-        success_url: origin + "/app.html?checkout=success",
-        cancel_url: origin + "/app.html?checkout=cancelled",
-      });
-      return json(200, { url: session.url });
+      // Create-only, short-TTL claim per user: two concurrent requests (a double click, two tabs)
+      // must not each open a Stripe Checkout Session and risk two subscriptions.
+      const claim = await claimCheckout(user.id);
+      if (!claim) {
+        return err(409, "checkout_in_progress", "A checkout for this account was just started; finish it, or try again in a minute.");
+      }
+      try {
+        const session = await createCheckoutSession(cfg, {
+          user_id: user.id,
+          email: user.email,
+          customer_id: user.billing?.customer_id ?? null,
+          tier,
+          success_url: origin + "/app.html?checkout=success",
+          cancel_url: origin + "/app.html?checkout=cancelled",
+          idempotency_key: checkoutIdempotencyKey(user.id, tier, user.billing?.customer_id ?? null),
+        });
+        return json(200, { url: session.url });
+      } catch (e) {
+        // No session was created: free the claim so the user can retry at once.
+        await releaseCheckout(user.id, claim).catch(() => {});
+        throw e;
+      }
     }
 
     if (pathname === "/api/billing/portal") {

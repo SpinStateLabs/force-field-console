@@ -5,6 +5,11 @@ import { setStoreForTesting, type KV } from "../src/lib/store";
 
 export class MemStore implements KV {
   private map = new Map<string, unknown>();
+  private etags = new Map<string, number>();
+  private clock = 0;
+  private touch(key: string): void {
+    this.etags.set(key, ++this.clock);
+  }
 
   async get(key: string, _opts?: { type?: "json" | "text" }): Promise<any> {
     if (!this.map.has(key)) return null;
@@ -15,16 +20,31 @@ export class MemStore implements KV {
   async setJSON(key: string, value: any): Promise<void> {
     // Store a structured clone so later mutation of the caller's object has no effect.
     this.map.set(key, structuredClone(value));
+    this.touch(key);
   }
 
   async setJSONIfNew(key: string, value: any): Promise<boolean> {
     if (this.map.has(key)) return false;
     this.map.set(key, structuredClone(value));
+    this.touch(key);
+    return true;
+  }
+
+  async getWithEtag(key: string): Promise<{ data: any; etag: string } | null> {
+    if (!this.map.has(key)) return null;
+    return { data: structuredClone(this.map.get(key)), etag: String(this.etags.get(key)) };
+  }
+
+  async setJSONIfMatch(key: string, value: any, etag: string): Promise<boolean> {
+    if (!this.map.has(key) || String(this.etags.get(key)) !== etag) return false;
+    this.map.set(key, structuredClone(value));
+    this.touch(key);
     return true;
   }
 
   async delete(key: string): Promise<void> {
     this.map.delete(key);
+    this.etags.delete(key);
   }
 
   async list(opts?: { prefix?: string }): Promise<{ blobs: { key: string }[] }> {

@@ -51,7 +51,12 @@ export default async (req: Request, _context: Context): Promise<Response> => {
 
   try {
     if (req.method === "POST" && pathname === "/api/estate/advance") {
-      const r = await advanceEstate(estate, flyClientOrNull());
+      // Like every other mutation: unconfigured is a 501, never a 200 "idle" that reads as success.
+      // (Only the dashboard's worker kick and the scheduled tick drive provisioning; both call the
+      // library / background function directly and never this endpoint.)
+      const fly = flyClientOrNull();
+      if (!fly) return err(501, "provisioning_not_configured", NOT_CONFIGURED);
+      const r = await advanceEstate(estate, fly);
       return json(200, { outcome: r.outcome, note: r.note, estate: publicEstate(r.estate) });
     }
 

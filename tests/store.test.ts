@@ -5,7 +5,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const opened: { fn: string; opts: any }[] = [];
 const setJSON = vi.fn(async (_key: string, _value: unknown, _opts?: any) => ({ modified: true }));
-const fake = { get: vi.fn(async () => null), setJSON, delete: vi.fn(async () => undefined), list: vi.fn(async () => ({ blobs: [], directories: [] })) };
+const getWithMetadata = vi.fn(async (_key: string, _opts?: any): Promise<any> => ({ data: { a: 1 }, etag: "etag-1", metadata: {} }));
+const fake = { get: vi.fn(async () => null), getWithMetadata, setJSON, delete: vi.fn(async () => undefined), list: vi.fn(async () => ({ blobs: [], directories: [] })) };
 
 vi.mock("@netlify/blobs", () => ({
   getStore: (opts: any) => {
@@ -68,5 +69,26 @@ describe("portalStore (production adapter)", () => {
     expect(await store.setJSONIfNew("k", { a: 2 })).toBe(false);
     await store.setJSON("k", { a: 3 });
     expect(setJSON).toHaveBeenLastCalledWith("k", { a: 3 });
+  });
+
+  it("a stored value that comes back without an etag is a hard error, never 'absent'", async () => {
+    process.env.CONTEXT = "production";
+    const store = await portalStore();
+    getWithMetadata.mockResolvedValueOnce({ data: { a: 1 }, etag: undefined, metadata: {} });
+    await expect(store.getWithEtag("k")).rejects.toThrow(/etag/);
+  });
+
+  it("getWithEtag / setJSONIfMatch map to getWithMetadata and an onlyIfMatch write", async () => {
+    process.env.CONTEXT = "production";
+    const store = await portalStore();
+    expect(await store.getWithEtag("k")).toEqual({ data: { a: 1 }, etag: "etag-1" });
+    expect(getWithMetadata).toHaveBeenLastCalledWith("k", { type: "json" });
+    getWithMetadata.mockResolvedValueOnce(null);
+    expect(await store.getWithEtag("gone")).toBeNull();
+    setJSON.mockResolvedValueOnce({ modified: true });
+    expect(await store.setJSONIfMatch("k", { a: 2 }, "etag-1")).toBe(true);
+    expect(setJSON).toHaveBeenLastCalledWith("k", { a: 2 }, { onlyIfMatch: "etag-1" });
+    setJSON.mockResolvedValueOnce({ modified: false });
+    expect(await store.setJSONIfMatch("k", { a: 3 }, "stale")).toBe(false);
   });
 });
