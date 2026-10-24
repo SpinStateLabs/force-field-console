@@ -11,10 +11,22 @@
 export const GUIDE_URL = "https://github.com/SpinStateLabs/force-field-console/blob/main/docs/estate-quickstart.md";
 export const GATEWAY_BASE = "https://force-field-console.netlify.app/api/v1";
 
-const PS_PREAMBLE = [
-  '# Windows PowerShell 5.1 -- needs the three variables from step 0.4 set in this window.',
-  '$h = @{ "x-api-key" = $env:FF_KEY }',
-].join("\n");
+// Windows PowerShell 5.1 blocks use curl.exe (explicit .exe, so the Invoke-WebRequest alias is not hit):
+// Invoke-RestMethod throws on every 4xx/5xx and hides the body, but the guide's failure codes
+// (403 D.grantor, 422 D.scope, 404 lifecycle/findings) are exactly what you need to read.
+// JSON bodies go through a UTF-8 file (no BOM) because 5.1 strips the double quotes out of native arguments.
+const PS_W = ' -w "\\nHTTP %{http_code}\\n"';
+const PS_KEY = '-H "x-api-key: $env:FF_KEY"';
+function psPost(path, bodyExpr, extraHeaders) {
+  return [
+    "$body = " + bodyExpr,
+    '[IO.File]::WriteAllText("$env:TEMP\\ff-body.json", $body)',
+    'curl.exe -s -X POST "$env:FF' + path + '" ' + PS_KEY + (extraHeaders ? " " + extraHeaders : "") + ' -H "content-type: application/json" --data-binary "@$env:TEMP\\ff-body.json"' + PS_W,
+  ].join("\n");
+}
+function psGet(path) {
+  return 'curl.exe -s "$env:FF' + path + '" ' + PS_KEY + PS_W;
+}
 
 export const STEPS = [
   {
@@ -134,7 +146,7 @@ export const STEPS = [
       {
         label: "Register invoice-bot",
         sh: `curl -s -X POST "$FF/registry/agents" -H "x-api-key: $FF_KEY" -H "content-type: application/json" \\\n  -d '{"agent_id":"invoice-bot","name":"Invoice bot","owner":"'"$ME"'","domain":"finance"}'`,
-        ps: `${PS_PREAMBLE}\n$body = @{ agent_id = "invoice-bot"; name = "Invoice bot"; owner = $env:ME; domain = "finance" } | ConvertTo-Json -Compress\nInvoke-RestMethod -Method Post -Uri "$env:FF/registry/agents" -Headers $h -ContentType "application/json" -Body $body`,
+        ps: psPost("/registry/agents", `'{"agent_id":"invoice-bot","name":"Invoice bot","owner":"' + $env:ME + '","domain":"finance"}'`),
       },
     ],
     see: ["The agent is listed by the registry call in step 6 (GET /registry/agents)."],
@@ -162,14 +174,14 @@ export const STEPS = [
       {
         label: "Mint a 24-hour token",
         sh: `curl -s -X POST "$FF/delegation/tokens" -H "x-api-key: $FF_KEY" -H "content-type: application/json" \\\n  -d '{"agent_id":"invoice-bot","granted_by":"'"$ME"'","scope":["draft invoice"],"ttl_seconds":86400}'`,
-        ps: `${PS_PREAMBLE}\n$body = @{ agent_id = "invoice-bot"; granted_by = $env:ME; scope = @("draft invoice"); ttl_seconds = 86400 } | ConvertTo-Json -Compress\nInvoke-RestMethod -Method Post -Uri "$env:FF/delegation/tokens" -Headers $h -ContentType "application/json" -Body $body`,
+        ps: psPost("/delegation/tokens", `'{"agent_id":"invoice-bot","granted_by":"' + $env:ME + '","scope":["draft invoice"],"ttl_seconds":86400}'`),
       },
       {
         label: "Revoke (replace <token_id>)",
         sh: 'curl -s -X POST "$FF/delegation/tokens/<token_id>/revoke" -H "x-api-key: $FF_KEY"',
         derivedSh: true,
         sNote: "The guide gives only the route, POST $FF/delegation/tokens/<token_id>/revoke; this curl form is expanded from it.",
-        ps: `${PS_PREAMBLE}\nInvoke-RestMethod -Method Post -Uri "$env:FF/delegation/tokens/<token_id>/revoke" -Headers $h`,
+        ps: 'curl.exe -s -X POST "$env:FF/delegation/tokens/<token_id>/revoke" ' + PS_KEY + PS_W,
       },
     ],
     see: ["A JSON answer carrying token_id. Keep it with the agent; step 3 and step 4 use it."],
@@ -193,7 +205,7 @@ export const STEPS = [
       {
         label: "Sentinel check",
         sh: `curl -s -X POST "$FF/sentinel/check" -H "x-api-key: $FF_KEY" -H "content-type: application/json" \\\n  -d '{"agent_id":"invoice-bot","action":"draft invoice","token_id":"<token_id>"}'`,
-        ps: `${PS_PREAMBLE}\n$body = @{ agent_id = "invoice-bot"; action = "draft invoice"; token_id = "<token_id>" } | ConvertTo-Json -Compress\nInvoke-RestMethod -Method Post -Uri "$env:FF/sentinel/check" -Headers $h -ContentType "application/json" -Body $body`,
+        ps: psPost("/sentinel/check", `'{"agent_id":"invoice-bot","action":"draft invoice","token_id":"<token_id>"}'`),
       },
     ],
     see: [
@@ -222,7 +234,7 @@ export const STEPS = [
       {
         label: "Governed message",
         sh: `curl -s -X POST "$FF/gateway/v1/messages" -H "x-api-key: $FF_KEY" -H "content-type: application/json" \\\n  -H "x-field-agent-id: invoice-bot" -H "x-field-token: <token_id>" -H "x-field-action: draft invoice" \\\n  -d '{"model":"claude-haiku-4-5","max_tokens":200,"messages":[{"role":"user","content":"Draft a two-line invoice note."}]}'`,
-        ps: `$h = @{ "x-api-key" = $env:FF_KEY; "x-field-agent-id" = "invoice-bot"; "x-field-token" = "<token_id>"; "x-field-action" = "draft invoice" }\n$body = @{ model = "claude-haiku-4-5"; max_tokens = 200; messages = @(@{ role = "user"; content = "Draft a two-line invoice note." }) } | ConvertTo-Json -Depth 5 -Compress\nInvoke-RestMethod -Method Post -Uri "$env:FF/gateway/v1/messages" -Headers $h -ContentType "application/json" -Body $body`,
+        ps: psPost("/gateway/v1/messages", `'{"model":"claude-haiku-4-5","max_tokens":200,"messages":[{"role":"user","content":"Draft a two-line invoice note."}]}'`, '-H "x-field-agent-id: invoice-bot" -H "x-field-token: <token_id>" -H "x-field-action: draft invoice"'),
       },
     ],
     see: ["An Anthropic-Messages-shaped answer, after the gateway has checked identity and authority."],
@@ -250,8 +262,8 @@ export const STEPS = [
       {
         label: "Download the pack (period 2026-Q3)",
         sh: `curl -s "$FF/attest/pack?period=2026-Q3" -H "x-api-key: $FF_KEY" > board-pack.json\ncurl -s "$FF/attest/pack.html?period=2026-Q3" -H "x-api-key: $FF_KEY" > board-pack.html`,
-        ps: `${PS_PREAMBLE}\nInvoke-WebRequest -UseBasicParsing -Uri "$env:FF/attest/pack?period=2026-Q3" -Headers $h -OutFile board-pack.json\nInvoke-WebRequest -UseBasicParsing -Uri "$env:FF/attest/pack.html?period=2026-Q3" -Headers $h -OutFile board-pack.html`,
-        psNote: "Uses -OutFile: in Windows PowerShell 5.1 the > operator writes UTF-16, which would break verification.",
+        ps: 'curl.exe -s "$env:FF/attest/pack?period=2026-Q3" ' + PS_KEY + ' -o board-pack.json\ncurl.exe -s "$env:FF/attest/pack.html?period=2026-Q3" ' + PS_KEY + ' -o board-pack.html',
+        psNote: "Uses curl.exe -o (bytes written as received); the > operator in Windows PowerShell 5.1 writes UTF-16 and would break verification. If a file holds a short JSON error instead of a pack, read it: it carries the refusal code.",
       },
       {
         label: "Verify off-box",
@@ -286,7 +298,7 @@ export const STEPS = [
       {
         label: "Ledger health, registry, lifecycle findings",
         sh: `curl -s "$FF/ledger/health" -H "x-api-key: $FF_KEY"          # signing: on, require_signing, appendable, key fingerprint\ncurl -s "$FF/registry/agents" -H "x-api-key: $FF_KEY"\ncurl -s "$FF/lifecycle/findings" -H "x-api-key: $FF_KEY"     # the daily sweep's report (404 before the first sweep)`,
-        ps: `${PS_PREAMBLE}\nInvoke-RestMethod -Uri "$env:FF/ledger/health" -Headers $h      # signing: on, require_signing, appendable, key fingerprint\nInvoke-RestMethod -Uri "$env:FF/registry/agents" -Headers $h\nInvoke-RestMethod -Uri "$env:FF/lifecycle/findings" -Headers $h   # the daily sweep's report (404 before the first sweep)`,
+        ps: [psGet("/ledger/health") + '      # signing: on, require_signing, appendable, key fingerprint', psGet("/registry/agents"), psGet("/lifecycle/findings") + '   # the daily sweep\'s report (404 before the first sweep)'].join('\n'),
       },
     ],
     see: [
@@ -379,16 +391,20 @@ export function stepStatus(statusKey, ctx) {
   if (statusKey === "boundaries") {
     const bits = [];
     bits.push("Estate status: " + String(estate.status));
-    if (estate.health) bits.push("last health check: " + (estate.health.ok ? "ok" : "PROBLEM") + (estate.health.note ? " (" + estate.health.note + ")" : ""));
+    if (estate.health) bits.push("last health check: " + (estate.health.ok ? "ok" : "PROBLEM") + (estate.health.note ? " (" + estate.health.note + ")" : "") + (estate.health.checked_at ? " as of " + estate.health.checked_at : ""));
+    if (estate.suspend_pending) bits.push("suspension pending");
     if (estate.image) bits.push("engine image: " + estate.image);
     if (estate.upgrade_failed_image) bits.push("rollout HALTED for image " + estate.upgrade_failed_image);
     const bad = estate.upgrade_failed_image || (estate.health && !estate.health.ok);
     return { kind: bad ? "err" : "info", label: bad ? "needs attention" : "as reported", text: bits.join(" · ") };
   }
+  if (estate.status === "ready" && estate.suspend_pending) {
+    return { kind: "warn", label: "being suspended", text: "Your estate is being suspended (the subscription is not active). Commands will be refused by the gateway (403 estate_suspended) until billing is reactivated." };
+  }
   if (estate.status !== "ready") {
     const why = {
       provisioning: "The estate is still provisioning; this step becomes available once it is ready.",
-      pending_manual: "Spin State Labs provisions this estate by hand; this step becomes available once it is ready.",
+      pending_manual: "Spin State Labs provisions this estate by hand. Until it is ready the gateway routes your API key to the shared SANDBOX estate, not to your own: commands work, but against the sandbox, which may be wiped.",
       suspended: "The estate is suspended (subscription not active). The machine is stopped and the data is kept.",
       error: "Provisioning failed. See the dashboard for the error and the retry button.",
     }[estate.status] || "The estate is not ready.";

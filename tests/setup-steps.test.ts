@@ -189,3 +189,39 @@ describe("live status is honest", () => {
     expect(marks).toEqual(["roster-scopes", "api-key"]);
   });
 });
+
+describe("review fixes", () => {
+  const est = (over: any) => ({
+    signedIn: true, me: { email: "a@b.co", tier: "operator" }, keys: [],
+    estate: { status: "ready", roster: { allowed_scope: ["x"] }, fingerprints: {}, ...over },
+  });
+  it("a ready estate with suspend_pending is not ready (the gateway answers 403 estate_suspended)", () => {
+    const c = est({ suspend_pending: { since: "2026-10-23T00:00:00Z" } });
+    for (const k of ["roster", "anthropic", "estate-ready", "governed", "attest", "ledger"]) {
+      const s = stepStatus(k, c);
+      expect(s.kind, k).toBe("warn");
+      expect(s.text, k).toMatch(/being suspended.*refused/i);
+    }
+  });
+  it("pending_manual says commands go to the shared sandbox, not the account's estate", () => {
+    const s = stepStatus("estate-ready", est({ status: "pending_manual" }));
+    expect(s.kind).toBe("warn");
+    expect(s.text).toMatch(/shared sandbox/i);
+    expect(s.text).not.toMatch(/becomes available once it is ready/);
+  });
+  it("the health line says when it was checked", () => {
+    const s = stepStatus("boundaries", est({ health: { ok: true, note: "fine", checked_at: "2026-10-23T10:00:00Z" } }));
+    expect(s.text).toContain("as of 2026-10-23T10:00:00Z");
+  });
+  it("PowerShell blocks use curl.exe so error bodies stay readable", () => {
+    for (const s of STEPS) for (const c of s.commands) {
+      if (!c.ps || c.shared || s.id === "environment") continue;
+      expect(c.ps, s.id).not.toMatch(/Invoke-RestMethod|Invoke-WebRequest|&&|\bcurl\s/);
+      expect(c.ps, s.id).toContain("curl.exe");
+      if (s.id !== "attest-pack") expect(c.ps, s.id).toContain("%{http_code}");
+    }
+  });
+  it("Refresh status restores keyboard focus after re-rendering", () => {
+    expect(read("public/setup.js")).toMatch(/refresh-status[\s\S]*focus\(\)/);
+  });
+});

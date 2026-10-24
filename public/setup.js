@@ -139,7 +139,15 @@ function statusCard(step) {
   }
   const btn = el("button", "btn btn-secondary btn-small", "Refresh status");
   btn.type = "button";
-  btn.addEventListener("click", async () => { btn.disabled = true; await loadStatus(); route(false); announce("Status refreshed."); });
+  btn.id = "refresh-status";
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    await loadStatus();
+    route(false);
+    const again = document.getElementById("refresh-status");
+    if (again) again.focus();
+    announce("Status refreshed.");
+  });
   card.appendChild(btn);
   return card;
 }
