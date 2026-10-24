@@ -738,15 +738,17 @@ export async function suspendEstate(
 
   if (fly && machineId) {
     try {
-      await fly.stopMachine(e.app, machineId);
-      logEstate(e, "suspend", `machine ${machineId} stopped: ${reason}`, now);
-      await setAutostart(e, fly, machineId, false, now);
+      const r = await quiesceMachine(e.app, fly, machineId);
+      logEstate(
+        e,
+        "suspend",
+        r === "gone"
+          ? `machine ${machineId} not found on Fly (already gone): ${reason}`
+          : `machine ${machineId} stopped with proxy autostart disabled (verified by read-back): ${reason}`,
+        now,
+      );
     } catch (err: any) {
-      if (err instanceof FlyError && err.status === 404) {
-        logEstate(e, "suspend", `machine ${machineId} not found on Fly (already stopped or gone): ${reason}`, now);
-      } else {
-        return failStop(err);
-      }
+      return failStop(err);
     }
   } else {
     logEstate(e, "suspend", `marked suspended: ${reason}` + (fly ? "" : " (provisioning not configured; no machine to stop)"), now);
@@ -772,20 +774,43 @@ export async function clearSuspendPending(e: Estate, why: string, now: Date = ne
 }
 
 /**
- * Flip the proxy autostart on a stopped machine without launching it, so an inbound request cannot
- * wake a suspended estate. Best effort: the gateway refuses suspended estates regardless.
+ * Make a machine durably stopped. Stopping alone is NOT durable: with the proxy's autostart on,
+ * any inbound request (a customer, a scanner, a health look) starts a stopped machine again and
+ * it keeps billing (seen live: stopped at 03:15:07Z, restarted by the proxy at 03:15:10Z). So:
+ *   1. read the machine; gone (404) means nothing to stop;
+ *   2. write the config with every service's autostart OFF first (without launching a stopped machine);
+ *   3. stop it unless it is already stopped, and wait for "stopped";
+ *   4. READ BACK: the machine must be stopped AND every service must report autostart off.
+ * Any failure throws, so the caller keeps the suspension pending and retries; the estate is marked
+ * suspended only after all of this succeeded. Returns "gone" when Fly no longer has the machine.
  */
-async function setAutostart(e: Estate, fly: FlyClient, machineId: string, autostart: boolean, now: Date): Promise<void> {
-  const step = autostart ? "resume" : "suspend";
+export async function quiesceMachine(app: string, fly: FlyClient, machineId: string): Promise<"stopped" | "gone"> {
   try {
-    if (!autostart) await fly.waitMachine(e.app, machineId, "stopped", 30);
-    const m = await fly.getMachine(e.app, machineId);
-    if (!m?.config) throw new Error("machine config unreadable");
-    await fly.updateMachine(e.app, machineId, withAutostart(m.config, autostart), { skipLaunch: true });
-    logEstate(e, step, `proxy autostart ${autostart ? "restored" : "disabled"}`, now);
+    const m = await fly.getMachine(app, machineId);
+    if (!m || m.state === "destroyed") return "gone";
+    if (!m.config) throw new Error("machine config unreadable");
+    if ((m.config.services ?? []).some((s: any) => s.autostart !== false)) {
+      await fly.updateMachine(app, machineId, withAutostart(m.config, false), { skipLaunch: m.state !== "started" });
+    }
+    if (m.state !== "stopped") await fly.stopMachine(app, machineId);
+    if (!(await fly.waitMachine(app, machineId, "stopped", 30))) throw new Error("machine did not reach stopped");
+    const v = await fly.getMachine(app, machineId);
+    if (!v || v.state === "destroyed") return "gone";
+    if (v.state !== "stopped") throw new Error("read-back: machine is not stopped");
+    if ((v.config?.services ?? []).some((s: any) => s.autostart !== false) || !v.config) throw new Error("read-back: proxy autostart is still on");
+    return "stopped";
   } catch (err: any) {
-    console.error("estate autostart switch failed for", e.app, String(err?.message ?? err).slice(0, 300));
-    logEstate(e, step, `proxy autostart ${autostart ? "restore" : "disable"} failed`, now);
+    if (err instanceof FlyError && err.status === 404) return "gone";
+    throw err;
+  }
+}
+
+/** The reverse, for resume: autostart back ON first (a stopped machine is not launched by this), then the caller starts it. */
+async function restoreAutostart(app: string, fly: FlyClient, machineId: string): Promise<void> {
+  const m = await fly.getMachine(app, machineId);
+  if (!m?.config) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
+  if ((m.config.services ?? []).some((s: any) => s.autostart !== true)) {
+    await fly.updateMachine(app, machineId, withAutostart(m.config, true), { skipLaunch: m.state !== "started" });
   }
 }
 
@@ -793,7 +818,7 @@ async function setAutostart(e: Estate, fly: FlyClient, machineId: string, autost
 export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date = new Date()): Promise<Estate> {
   if (e.status !== "suspended") return e;
   if (fly && e.machine_id) {
-    await setAutostart(e, fly, e.machine_id, true, now);
+    await restoreAutostart(e.app, fly, e.machine_id);
     await fly.startMachine(e.app, e.machine_id);
     logEstate(e, "resume", `machine ${e.machine_id} started`, now);
   } else {

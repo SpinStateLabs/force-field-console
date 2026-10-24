@@ -96,8 +96,15 @@ class FakeFly {
     (this.machines[app] ??= []).push(m);
     return m;
   }
-  async getMachine(app: string, id: string) { this.rec("getMachine", app, id); return this.machines[app]?.find((m) => m.id === id) ?? null; }
-  async waitMachine(app: string, id: string, state: string) { this.rec("waitMachine", app, id, state); return true; }
+  async getMachine(app: string, id: string) {
+    this.rec("getMachine", app, id);
+    const m = this.machines[app]?.find((x) => x.id === id);
+    return m ? structuredClone(m) : null;
+  }
+  async waitMachine(app: string, id: string, state: string) {
+    this.rec("waitMachine", app, id, state);
+    return (this.machines[app]?.find((m) => m.id === id)?.state ?? "stopped") === state;
+  }
   async updateMachine(app: string, id: string, config: any, opts: any = {}) {
     this.rec("updateMachine", app, id, opts);
     const m = this.machines[app]?.find((x) => x.id === id);
@@ -109,8 +116,16 @@ class FakeFly {
     this.execs.push(command);
     return this.execHandler(command);
   }
-  async stopMachine(app: string, id: string) { this.rec("stopMachine", app, id); }
-  async startMachine(app: string, id: string) { this.rec("startMachine", app, id); }
+  async stopMachine(app: string, id: string) {
+    this.rec("stopMachine", app, id);
+    const m = this.machines[app]?.find((x) => x.id === id);
+    if (m) m.state = "stopped";
+  }
+  async startMachine(app: string, id: string) {
+    this.rec("startMachine", app, id);
+    const m = this.machines[app]?.find((x) => x.id === id);
+    if (m) m.state = "started";
+  }
   count(m: string) { return this.calls.filter((c) => c.m === m).length; }
 }
 
@@ -330,23 +345,22 @@ describe("dedicated estates", () => {
     e.url = `https://${e.app}.fly.dev`;
     await saveEstate(e);
     const fly = new FakeFly();
-    fly.machines[e.app] = [{ id: "m_1", name: "estate", config: { image: "img", services: [{ internal_port: 8080, autostart: true }] } }];
+    fly.machines[e.app] = [{ id: "m_1", name: "estate", state: "started", config: { image: "img", services: [{ internal_port: 8080, autostart: true }] } }];
     const s = await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
     expect(s.status).toBe("suspended");
     expect(s.suspended_from).toBe("ready");
-    // stop, then switch the proxy autostart off on the stopped machine without launching it
-    expect(fly.calls.map((c) => c.m)).toEqual(["stopMachine", "waitMachine", "getMachine", "updateMachine"]);
-    expect(fly.calls[3].args[2]).toEqual({ skipLaunch: true });
+    // autostart off FIRST, then stop, wait, and a read-back
+    expect(fly.calls.map((c) => c.m)).toEqual(["getMachine", "updateMachine", "stopMachine", "waitMachine", "getMachine"]);
     expect(fly.machines[e.app][0].config.services[0].autostart).toBe(false);
     const back = await resumeEstate((await getEstate(user.id))!, fly as any);
     expect(back.status).toBe("ready");
     expect(back.suspended_at).toBeNull();
     // autostart is restored before the machine is started
-    expect(fly.calls.slice(4).map((c) => c.m)).toEqual(["getMachine", "updateMachine", "startMachine"]);
+    expect(fly.calls.slice(5).map((c) => c.m)).toEqual(["getMachine", "updateMachine", "startMachine"]);
     expect(fly.machines[e.app][0].config.services[0].autostart).toBe(true);
   });
 
-  it("still marks the estate suspended when the autostart switch fails", async () => {
+  it("does NOT mark the estate suspended when the autostart switch fails: it stays pending", async () => {
     const e = await queueEstate(user);
     e.status = "ready";
     e.step = "done";
@@ -355,8 +369,8 @@ describe("dedicated estates", () => {
     const fly = new FakeFly();
     fly.failOn.getMachine = 1;
     const s = await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
-    expect(s.status).toBe("suspended");
-    expect(fly.count("stopMachine")).toBe(1);
+    expect(s.status).toBe("ready");
+    expect(s.suspend_pending).toBeTruthy();
   });
 
   it("places the Anthropic key as an estate secret, restarts the machine and stores only the time", async () => {

@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import billingHandler from "../netlify/functions/billing.mts";
 import healthHandler from "../netlify/functions/health.mts";
 import tickHandler from "../netlify/functions/estate-tick.mts";
+import { ModelFly, machinesApiHandler } from './model-fly';
 import { MemStore, freshStore } from "./helpers";
 import { setStoreForTesting } from "../src/lib/store";
 import { createUser, getUserById, saveUser, type User } from "../src/lib/users";
@@ -29,14 +30,20 @@ class SlowFly {
   startDelay = 0;
   stopFail = false;
   machines: { id: string; name: string }[] = [];
-  async stopMachine(_app: string, id: string) {
+  model = new ModelFly();
+  getMachine(a: string, i: string) { return this.model.getMachine(a, i); }
+  updateMachine(a: string, i: string, c: any, o?: any) { return this.model.updateMachine(a, i, c, o); }
+  waitMachine(a: string, i: string, s: string) { return this.model.waitMachine(a, i, s); }
+  async stopMachine(a: string, id: string) {
     this.calls.push("stop " + id);
     await sleep(this.stopDelay);
     if (this.stopFail) throw new FlyError(503, "x", "boom");
+    await this.model.stopMachine(a, id);
   }
-  async startMachine(_app: string, id: string) {
+  async startMachine(a: string, id: string) {
     this.calls.push("start " + id);
     await sleep(this.startDelay);
+    await this.model.startMachine(a, id);
   }
   async listMachines() { return this.machines; }
 }
@@ -93,14 +100,11 @@ describe("MED: the tick's suspend retry cannot override a reactivation", () => {
     await readyEstate(user, { suspend_pending: { ...PENDING } });
     await cancelledBilling(user);
     const webhookFly = new SlowFly();
+    const tickModel = new ModelFly();
+    tickModel.stopDelay = 80;
+    const api = machinesApiHandler(tickModel);
     const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (url: any, init?: any) => {
-      if (init?.method === "POST" && String(url).includes("/machines/m_1/stop")) {
-        await sleep(80);
-        return new Response("{}", { status: 200 });
-      }
-      return new Response("", { status: 404 });
-    }) as any;
+    globalThis.fetch = (async (url: any, init?: any) => (await api(String(url), init)) ?? new Response("", { status: 404 })) as any;
     try {
       const tick = tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }));
       await sleep(10);
@@ -141,7 +145,11 @@ describe("MED: the tick's suspend retry cannot override a reactivation", () => {
   it("mirror: a retry that FAILS after the flag was cleared does not revive it", async () => {
     await readyEstate(user, { suspend_pending: { ...PENDING } });
     const tickCopy = (await getEstate(user.id))!;
+    const model = new ModelFly();
     const fly: any = {
+      getMachine: (a: string, i: string) => model.getMachine(a, i),
+      updateMachine: (a: string, i: string, c: any, o?: any) => model.updateMachine(a, i, c, o),
+      waitMachine: (a: string, i: string, s: string) => model.waitMachine(a, i, s),
       async stopMachine() {
         await clearSuspendPending((await getEstate(user.id))!, "active again");
         throw new FlyError(503, "x", "boom");

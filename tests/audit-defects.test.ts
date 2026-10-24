@@ -4,6 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import billingHandler from "../netlify/functions/billing.mts";
 import estateHandler from "../netlify/functions/estate.mts";
 import tickHandler from "../netlify/functions/estate-tick.mts";
+import { ModelFly, machinesApiHandler } from './model-fly';
 import { freshStore } from "./helpers";
 import { createUser, getUserById, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
@@ -30,14 +31,15 @@ function sub(over: Partial<any> = {}, userId?: string) {
   };
 }
 
-class StopFly {
+class StopFly extends ModelFly {
   calls: string[] = [];
   stopFails = false;
   async stopMachine(app: string, id: string) {
     this.calls.push(`stop ${app} ${id}`);
     if (this.stopFails) throw new Error("fly 503");
+    await super.stopMachine(app, id);
   }
-  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); }
+  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); await super.startMachine(app, id); }
 }
 
 async function readyEstateFor(u: User, machine = "m_1") {
@@ -148,19 +150,13 @@ describe("defect 2: a failed stop never marks the estate suspended", () => {
     failing.stopFails = true;
     await suspendEstate((await getEstate(user.id))!, failing as any, new Date(Date.now() - 3_600_000), "subscription canceled"); // an hour ago: the retry backoff has elapsed
 
-    const stops: string[] = [];
+    const model = new ModelFly();
+    const api = machinesApiHandler(model);
     const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (url: any, init?: any) => {
-      const u = String(url);
-      if (init?.method === "POST" && u.includes("/machines/m_1/stop")) {
-        stops.push(u);
-        return new Response("{}", { status: 200 });
-      }
-      return new Response("", { status: 404 });
-    }) as any;
+    globalThis.fetch = (async (url: any, init?: any) => (await api(String(url), init)) ?? new Response("", { status: 404 })) as any;
     try {
       const body = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
-      expect(stops.length).toBe(1);
+      expect(model.log.filter((l) => l === "stop m_1").length).toBe(1);
       expect(body.outcomes.suspend_retry_ok).toBe(1);
       expect((await getEstate(user.id))!.status).toBe("suspended");
       expect(((await getEstate(user.id)) as any).suspend_pending).toBeNull();

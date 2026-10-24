@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import handler from "../netlify/functions/billing.mts";
+import { ModelFly, machinesApiHandler } from './model-fly';
 import { freshStore } from "./helpers";
 import { createUser, getUserById, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
@@ -25,10 +26,10 @@ function sub(over: Partial<any> = {}, userId?: string) {
   };
 }
 
-class StopFly {
+class StopFly extends ModelFly {
   calls: string[] = [];
-  async stopMachine(app: string, id: string) { this.calls.push(`stop ${app} ${id}`); }
-  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); }
+  async stopMachine(app: string, id: string) { this.calls.push(`stop ${app} ${id}`); await super.stopMachine(app, id); }
+  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); await super.startMachine(app, id); }
 }
 
 async function cookieFor(user: User): Promise<string> {
