@@ -20,7 +20,7 @@ import {
   type StripeConfig,
   type StripeSubscription,
 } from "./stripe";
-import { clearSuspendPending, getEstate, queueEstate, resumeEstate, suspendEstate, type Estate } from "./estates";
+import { getEstate, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export type WebhookDeps = {
@@ -186,7 +186,7 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   if (granting) {
     const estate = await queueEstate(user, now);
     if (estate.status === "suspended") await resumeEstate(estate, deps.fly, now);
-    else if (estate.suspend_pending) await clearSuspendPending(estate, "subscription active again", now);
+    else if (estate.suspend_pending) await reviveEstate(estate, deps.fly, now);
   } else {
     const estate = await getEstate(user.id);
     if (estate && (estate.status === "ready" || estate.status === "provisioning" || estate.status === "error")) {
@@ -196,28 +196,47 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   return tier;
 }
 
+/** True when the user's subscription currently grants a paid tier. */
+export function isGrantingUser(u: User | null): boolean {
+  return Boolean(u && u.tier !== "sandbox" && u.billing && GRANTING_STATUSES.has(u.billing.status));
+}
+
 /**
- * The tick's retry of a pending suspension. Runs under the same per-USER lock as the
- * webhook, re-reads the estate and the user's billing INSIDE it, and drops the retry when the
- * subscription is paying again; the stop and its write are further conditional on the
- * suspension still being pending in the stored record (see suspendEstate requirePending).
+ * The tick's reconciliation of one estate, under the same per-USER lock as the webhook, with the
+ * estate and the user's billing re-read INSIDE it:
+ *  - billing grants: the estate must be RUNNING. Suspended -> resume (autostart on, then start); a
+ *    leftover suspension flag -> revive (read the real machine, fix autostart / start it). A flag is
+ *    never just cleared. Failures are recorded (resume_pending: backoff, cap, then flagged).
+ *  - billing does not grant and a suspension is pending: retry the stop (conditional on it still
+ *    being pending in the stored record, see suspendEstate requirePending).
+ * NOTE: the lock outlives a killed webhook by up to SUB_LOCK_TTL_MS (5 minutes); until then events
+ * for that user are answered 5xx (Stripe redelivers) and the tick reports it as lock_busy/lock_stale.
  */
 export async function retryPendingSuspend(
   userId: string,
   fly: FlyClient,
   now: Date = new Date(),
-): Promise<{ outcome: "suspended" | "pending" | "cleared"; estate: Estate | null }> {
+): Promise<{ outcome: "suspended" | "pending" | "cleared" | "resumed" | "resume_failed"; estate: Estate | null }> {
   const run = async () => {
     const fresh = await getEstate(userId);
-    if (!fresh?.suspend_pending) return { outcome: "cleared" as const, estate: fresh };
+    if (!fresh || (!fresh.suspend_pending && fresh.status !== "suspended")) return { outcome: "cleared" as const, estate: fresh };
     const u = await getUserById(userId);
-    if (u && u.tier !== "sandbox" && u.billing && GRANTING_STATUSES.has(u.billing.status)) {
-      await clearSuspendPending(fresh, "subscription is active again (checked by the tick before retrying)", now);
-      return { outcome: "cleared" as const, estate: fresh };
+    if (isGrantingUser(u)) {
+      try {
+        if (fresh.status === "suspended") await resumeEstate(fresh, fly, now);
+        else await reviveEstate(fresh, fly, now);
+      } catch (err) {
+        const again = (await getEstate(userId)) ?? fresh;
+        await recordResumeFailure(again, now, err);
+        return { outcome: "resume_failed" as const, estate: await getEstate(userId) };
+      }
+      const stored = await getEstate(userId);
+      return { outcome: stored?.status === "ready" ? ("resumed" as const) : ("resume_failed" as const), estate: stored };
     }
+    if (!fresh.suspend_pending) return { outcome: "cleared" as const, estate: fresh };
     const r = await suspendEstate(fresh, fly, now, fresh.suspend_pending.reason, { requirePending: true });
     const stored = (await getEstate(userId)) ?? r;
-    return { outcome: stored.status === "suspended" ? ("suspended" as const) : stored.suspend_pending ? ("pending" as const) : ("cleared" as const), estate: stored };
+    return { outcome: stored.status === "suspended" && !stored.suspend_pending ? ("suspended" as const) : stored.suspend_pending ? ("pending" as const) : ("cleared" as const), estate: stored };
   };
   return withUserLock(userId, run);
 }
@@ -269,6 +288,13 @@ async function applyOrdered(
       for (const id of Object.keys(rest)) {
         const cand = await getSubscription(deps.cfg, id, deps.fetchImpl);
         delete rest[id];
+        // The candidate must belong to this customer and this user (never adopt a stranger's subscription).
+        const sameCustomer = String(cand.customer) === String(cur.customer_id);
+        const sameUser = !cand.metadata?.user_id || cand.metadata.user_id === fresh.id;
+        if (!(sameCustomer && sameUser)) {
+          console.warn("billing: hand-over candidate", id, "does not belong to this customer/user; skipped");
+          continue;
+        }
         if (grantsTier(deps, cand)) {
           if (!cand.metadata?.user_id) cand.metadata = { ...(cand.metadata ?? {}), user_id: fresh.id };
           fresh.billing = { ...cur, other_subs: Object.keys(rest).length ? rest : undefined };

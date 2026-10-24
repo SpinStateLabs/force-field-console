@@ -124,19 +124,17 @@ describe("MED: the tick's suspend retry cannot override a reactivation", () => {
     user.tier = "operator";
     user.billing = { customer_id: "cus_1", subscription_id: "sub_1", status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" };
     await saveUser(user);
-    const stops: string[] = [];
+    const model = new ModelFly();
+    const api = machinesApiHandler(model);
     const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (url: any, init?: any) => {
-      if (init?.method === "POST" && String(url).includes("/stop")) stops.push(String(url));
-      return new Response("", { status: 404 });
-    }) as any;
+    globalThis.fetch = (async (url: any, init?: any) => (await api(String(url), init)) ?? new Response("", { status: 404 })) as any;
     try {
       const body = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
-      expect(body.outcomes.suspend_retry_cleared).toBe(1);
+      expect(body.outcomes.resume_retry_ok).toBe(1);
     } finally {
       globalThis.fetch = realFetch;
     }
-    expect(stops).toEqual([]);
+    expect(model.log).not.toContain("stop m_1");
     const e = (await getEstate(user.id))!;
     expect(e.status).toBe("ready");
     expect(e.suspend_pending ?? null).toBeNull();

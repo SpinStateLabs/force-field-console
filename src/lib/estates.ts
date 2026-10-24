@@ -49,6 +49,9 @@ export type RosterRow = {
 /** The scheduled tick's last look at a ready estate: never a trigger for destruction, only a flag. */
 export type EstateHealth = { ok: boolean; checked_at: string; note: string };
 
+/** A resume the tick still owes a paying customer (bounded retries with backoff, then flagged for an operator). */
+export type ResumePending = { since: string; attempts: number; last_error: string; next_retry_at: string | null; failed: boolean };
+
 export type SuspendPending = {
   reason: string;
   since: string;
@@ -93,6 +96,7 @@ export type Estate = {
    * it meanwhile, and the scheduled tick retries the stop until it succeeds.
    */
   suspend_pending?: SuspendPending | null;
+  resume_pending?: ResumePending | null;
   lease_until: string | null;
   worker_until: string | null;
   created_at: string;
@@ -172,10 +176,11 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
   throw new EstateError(409, "estate_write_conflict", "The estate record kept changing underneath this write; try again.");
 }
 
-type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step";
+type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step" | "resume_pending";
 const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health"];
 const OWN_PENDING: readonly OwnedField[] = ["suspend_pending", "health"];
-const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending"];
+const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "resume_pending", "health"];
+const OWN_RESUME_PENDING: readonly OwnedField[] = ["resume_pending", "health"];
 
 function mergeSuspendWins(cur: Estate, mine: Estate): Estate {
   const suspended = cur.status === "suspended";
@@ -273,6 +278,7 @@ export async function queueEstate(user: User, now: Date = new Date()): Promise<E
     upgrade_failed_image: null,
     suspended_from: null,
     suspend_pending: null,
+    resume_pending: null,
     lease_until: null,
     worker_until: null,
     created_at: now.toISOString(),
@@ -659,6 +665,16 @@ export const MAX_SUSPEND_RETRIES = 10;
 const SUSPEND_BACKOFF_BASE_MS = 2 * 60_000;
 const SUSPEND_BACKOFF_MAX_MS = 60 * 60_000;
 const SUSPEND_ERR = "machine stop failed";
+/** After the fast retries are exhausted a failed suspension / resume is still retried slowly, a bounded number of times. */
+export const SLOW_RETRY_MS = 6 * 60 * 60_000;
+export const MAX_SLOW_RETRIES = 8;
+export const MAX_RESUME_RETRIES = 10;
+
+/** When a pending record is next due: its next_retry_at, or at once when it has none and has not failed. */
+export function retryDue(p: { next_retry_at: string | null; failed: boolean } | null | undefined, now: Date): boolean {
+  if (!p) return true;
+  return p.next_retry_at ? new Date(p.next_retry_at).getTime() <= now.getTime() : !p.failed;
+}
 
 /**
  * Stop the machine; keep the volume (no data is destroyed here). A failed stop leaves the
@@ -691,7 +707,7 @@ export async function suspendEstate(
       since: prior?.since ?? now.toISOString(),
       attempts,
       last_error: SUSPEND_ERR,
-      next_retry_at: failed ? null : next ? next.toISOString() : null,
+      next_retry_at: next ? next.toISOString() : null,
       failed,
     };
     e.health = { ok: false, checked_at: now.toISOString(), note };
@@ -731,7 +747,7 @@ export async function suspendEstate(
       failed
         ? `suspend failed: the machine could not be stopped after ${attempts} attempts; operator action needed`
         : `suspend pending: the machine could not be stopped yet (attempt ${attempts}); retrying`,
-      new Date(now.getTime() + delay),
+      failed ? (attempts < MAX_SUSPEND_RETRIES + MAX_SLOW_RETRIES ? new Date(now.getTime() + SLOW_RETRY_MS) : null) : new Date(now.getTime() + delay),
       prior,
     );
     logEstate(e, "suspend", failed ? `${SUSPEND_ERR}; giving up after ${attempts} attempts (suspend failed) - gateway refuses` : `${SUSPEND_ERR} (attempt ${attempts}); suspension pending - gateway refuses, tick retries`, now);
@@ -837,6 +853,61 @@ function markMachineMissing(e: Estate, now: Date): void {
   e.health = { ok: false, checked_at: now.toISOString(), note: "machine_missing: the Fly machine is gone; operator action needed (retry re-creates it on the existing volume)" };
 }
 
+/** Record a failed resume/revive of a paying customer's estate: generic text, backoff, cap, then a slow bounded retry. */
+export async function recordResumeFailure(e: Estate, now: Date, err: unknown): Promise<void> {
+  console.error("estate resume: failed for", e.app, String((err as any)?.message ?? err).slice(0, 300));
+  const prior = e.resume_pending;
+  const attempts = (prior?.attempts ?? 0) + 1;
+  const failed = attempts >= MAX_RESUME_RETRIES;
+  const delay = Math.min(SUSPEND_BACKOFF_BASE_MS * 2 ** (attempts - 1), SUSPEND_BACKOFF_MAX_MS);
+  const next = failed ? (attempts < MAX_RESUME_RETRIES + MAX_SLOW_RETRIES ? new Date(now.getTime() + SLOW_RETRY_MS) : null) : new Date(now.getTime() + delay);
+  e.resume_pending = { since: prior?.since ?? now.toISOString(), attempts, last_error: "machine start failed", next_retry_at: next ? next.toISOString() : null, failed };
+  e.health = {
+    ok: false,
+    checked_at: now.toISOString(),
+    note: failed
+      ? `resume failed: the machine could not be restarted after ${attempts} attempts; operator action needed`
+      : `resume pending: the machine could not be restarted yet (attempt ${attempts}); retrying`,
+  };
+  logEstate(e, "resume", failed ? "machine start failed; giving up after the fast retries (resume failed)" : `machine start failed (attempt ${attempts}); resume pending, tick retries`, now);
+  await saveEstate(e, now, { owns: OWN_RESUME_PENDING });
+}
+
+/**
+ * A paying customer's estate that still carries a suspension flag (the stop was started, perhaps
+ * even completed, before the subscription came back): the flag alone proves nothing about the
+ * machine. Read it; gone -> machine_missing; autostart off or not running -> autostart on, then
+ * start. Only then is the flag cleared. A failure throws and leaves the flag (retried by the tick).
+ */
+export async function reviveEstate(e: Estate, fly: FlyClient | null, now: Date = new Date()): Promise<Estate> {
+  if (!e.suspend_pending) return e;
+  if (fly && e.machine_id) {
+    const machineId = e.machine_id;
+    let m: Awaited<ReturnType<FlyClient["getMachine"]>> = null;
+    try {
+      m = await fly.getMachine(e.app, machineId);
+    } catch (err: any) {
+      if (!(err instanceof FlyError && err.status === 404)) throw err;
+    }
+    if (!m || m.state === "destroyed") {
+      markMachineMissing(e, now);
+      await saveEstate(e, now, { owns: [...OWN_RESUME, "health", "machine_id", "error", "step"] });
+      return e;
+    }
+    if (!m.config) throw new EstateError(502, "machine_unreadable", "The estate machine could not be read.");
+    if ((m.config.services ?? []).some((s: any) => s.autostart !== true)) {
+      await fly.updateMachine(e.app, machineId, withAutostart(m.config, true), { skipLaunch: m.state !== "started" });
+    }
+    if (m.state !== "started") await fly.startMachine(e.app, machineId);
+  }
+  e.suspend_pending = null;
+  e.resume_pending = null;
+  if (e.health && !e.health.ok && /^(suspend|resume) (pending|failed)/.test(e.health.note)) e.health = null;
+  logEstate(e, "resume", "subscription is active again; the machine was checked and is running with proxy autostart on", now);
+  await saveEstate(e, now, { owns: [...OWN_PENDING, "resume_pending"] });
+  return e;
+}
+
 /** Put autostart back OFF on a stopped machine after a resume that could not start it. If even that fails the suspension is flagged for the tick. */
 async function rollbackAutostart(e: Estate, fly: FlyClient, machineId: string, now: Date): Promise<void> {
   try {
@@ -893,6 +964,8 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
   e.suspended_from = null;
   e.suspended_at = null;
   e.suspend_pending = null;
+  e.resume_pending = null;
+  if (e.health && !e.health.ok && /^(suspend|resume) (pending|failed)/.test(e.health.note)) e.health = null;
   await saveEstate(e, now, { owns: OWN_RESUME });
   return e;
 }
@@ -1164,6 +1237,7 @@ export function publicEstate(e: Estate, now: Date = new Date()): Record<string, 
     ready_at: e.ready_at,
     suspended_at: e.suspended_at,
     suspend_pending: e.suspend_pending ?? null,
+    resume_pending: e.resume_pending ?? null,
     log: e.log.slice(-20),
   };
 }

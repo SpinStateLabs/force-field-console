@@ -5,6 +5,9 @@
 import { randomUUID } from "node:crypto";
 import { portalStore } from "./store";
 
+// NOTE: a webhook killed mid-transition leaves its lock behind until it expires (up to this TTL). In that
+// window events for that user are answered 5xx (Stripe redelivers) and the tick reports "lock_busy" /
+// "lock_stale" (see userLockAgeMs) instead of silently waiting.
 // Sized above the worst case of one suspend (get + update + stop + wait + four read-backs, each with
 // its own Fly timeout) plus margin: an expired lock lets a second writer in mid-transition.
 export const SUB_LOCK_TTL_MS = 5 * 60_000;
@@ -42,4 +45,11 @@ export function withUserLock<T>(userId: string, fn: () => Promise<T>): Promise<T
 
 export function withSubscriptionLock<T>(subId: string, fn: () => Promise<T>): Promise<T> {
   return withLock("stripe_sub_locks/" + subId, "subscription " + subId, fn);
+}
+
+/** Age of the user's lock in ms (null when not held): how long its holder has been inside. */
+export async function userLockAgeMs(userId: string, now: Date = new Date()): Promise<number | null> {
+  const rec = (await (await portalStore()).get("user_locks/" + userId, { type: "json" })) as { expires_at?: string } | null;
+  if (!rec?.expires_at) return null;
+  return now.getTime() - (new Date(rec.expires_at).getTime() - SUB_LOCK_TTL_MS);
 }

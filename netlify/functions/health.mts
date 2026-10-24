@@ -23,17 +23,21 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   // record kept by the scheduled tick; this unauthenticated endpoint never scans the estates and
   // exposes a boolean only. null when unknown (no tick has run yet / unreadable).
   let suspendFailed: boolean | null = null;
+  let resumeFailed: boolean | null = null;
   try {
-    const rec = (await (await portalStore()).get("ops/suspend_failed", { type: "json" })) as { count?: number } | null;
+    const rec = (await (await portalStore()).get("ops/suspend_failed", { type: "json" })) as { count?: number; resume_failed?: number } | null;
     suspendFailed = rec ? Number(rec.count ?? 0) > 0 : null;
+    resumeFailed = rec ? Number(rec.resume_failed ?? 0) > 0 : null;
   } catch {
     suspendFailed = null;
+    resumeFailed = null;
   }
 
   return new Response(
     JSON.stringify({
       ok: true,
       suspend_failed: suspendFailed,
+      resume_failed: resumeFailed,
       estate_attached: Boolean(env("ESTATE_URL")),
       billing_configured: stripeConfig() !== null,
       provisioning_configured: flyConfig() !== null,
