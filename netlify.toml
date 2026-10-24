@@ -8,3 +8,14 @@
 [build.environment]
   # @netlify/blobs 11 requires Node >= 22.12 (its engines field); pin the build and function runtime.
   NODE_VERSION = "22"
+
+# Favicons: short cache so a changed icon is picked up within a day (page links also carry ?v=N).
+[[headers]]
+  for = "/favicon.*"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+[[headers]]
+  for = "/apple-touch-icon.png"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
