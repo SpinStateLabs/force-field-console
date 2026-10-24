@@ -25,7 +25,7 @@ export default async (_req: Request): Promise<Response> => {
   }
   const now = new Date();
   const estates = await listEstates();
-  const stuckSuspends = estates.filter((e) => e.suspend_pending && e.status !== "suspended");
+  const stuckSuspends = estates.filter((e) => e.suspend_pending);
   const failedSuspends = stuckSuspends.filter((e) => e.suspend_pending!.failed).length;
   const dueSuspends = stuckSuspends.filter((e) => !e.suspend_pending!.failed && (!e.suspend_pending!.next_retry_at || new Date(e.suspend_pending!.next_retry_at).getTime() <= now.getTime()));
   const pending = estates.filter((e) => (e.status === "provisioning" || e.status === "pending_manual") && !e.suspend_pending && !workerActive(e, now));

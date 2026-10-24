@@ -142,7 +142,7 @@ describe("a suspended machine stays stopped when the proxy gets a request", () =
     const start = fly.log.findIndex((l) => l === "start m_1");
     expect(upd).toBeGreaterThanOrEqual(0);
     expect(start).toBeGreaterThan(upd);
-    expect(fly.machine("m_1").config.services.every((s) => s.autostart === true)).toBe(true);
+    expect(fly.machine("m_1").config.services.every((s: any) => s.autostart === true)).toBe(true);
   });
 });
 

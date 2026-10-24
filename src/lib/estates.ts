@@ -17,8 +17,9 @@
 
 import { createHash, createHmac } from "node:crypto";
 import { env, portalStore } from "./store";
-import type { User } from "./users";
-import { FlyError, estateMachineConfig, estateOrigin, flyConfig, withAutostart, type FetchLike, type FlyClient } from "./fly";
+import { getUserById, type User } from "./users";
+import { withSubscriptionLock } from "./locks";
+import { FlyError, estateMachineConfig, estateOrigin, flyConfig, withAutostart, type FetchLike, type FlyClient, type MachineConfig } from "./fly";
 
 export type EstateStatus = "pending_manual" | "provisioning" | "ready" | "suspended" | "error";
 
@@ -171,7 +172,7 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
   throw new EstateError(409, "estate_write_conflict", "The estate record kept changing underneath this write; try again.");
 }
 
-type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id";
+type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step";
 const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health"];
 const OWN_PENDING: readonly OwnedField[] = ["suspend_pending", "health"];
 const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending"];
@@ -596,7 +597,7 @@ export async function advanceEstate(
         break;
       }
       case "arm": {
-        await fly.updateMachine(e.app, e.machine_id!, estateMachineConfig(cfg, e.volume_id!, "armed", signer));
+        await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", signer));
         e.posture = { enforce: true, tool_check: true, require_signing: true, attest_signing: true };
         nextStep(e, "machine updated to the armed posture (signing required, attest signing, gateway enforce + tool check); restarting", now);
         break;
@@ -681,8 +682,9 @@ export async function suspendEstate(
   reason = "suspended",
   opts: { requirePending?: boolean } = {},
 ): Promise<Estate> {
-  if (e.status === "suspended") return e;
-  const onlyIf = opts.requirePending ? (cur: Estate) => Boolean(cur.suspend_pending) && cur.status !== "suspended" : undefined;
+  // A suspended estate with a pending flag is one whose machine still needs quieting (a failed resume rollback).
+  if (e.status === "suspended" && !e.suspend_pending) return e;
+  const onlyIf = opts.requirePending ? (cur: Estate) => Boolean(cur.suspend_pending) : undefined;
   const flag = (failed: boolean, attempts: number, note: string, next: Date | null, prior: SuspendPending | null | undefined) => {
     e.suspend_pending = {
       reason,
@@ -754,9 +756,11 @@ export async function suspendEstate(
     logEstate(e, "suspend", `marked suspended: ${reason}` + (fly ? "" : " (provisioning not configured; no machine to stop)"), now);
   }
   if (discovered) e.machine_id = machineId;
-  e.suspended_from = e.status;
-  e.status = "suspended";
-  e.suspended_at = now.toISOString();
+  if (e.status !== "suspended") {
+    e.suspended_from = e.status;
+    e.status = "suspended";
+    e.suspended_at = now.toISOString();
+  }
   e.suspend_pending = null;
   if (e.health && /^suspend (pending|failed)/.test(e.health.note)) e.health = null;
   await saveEstate(e, now, { owns: discovered ? [...OWN_SUSPEND, "machine_id"] : OWN_SUSPEND, onlyIf });
@@ -784,6 +788,9 @@ export async function clearSuspendPending(e: Estate, why: string, now: Date = ne
  * Any failure throws, so the caller keeps the suspension pending and retries; the estate is marked
  * suspended only after all of this succeeded. Returns "gone" when Fly no longer has the machine.
  */
+/** Fly reads can lag a write by a moment: the read-back is retried a few times before it counts as failed. */
+export const readback = { tries: 4, delayMs: 400 };
+
 export async function quiesceMachine(app: string, fly: FlyClient, machineId: string): Promise<"stopped" | "gone"> {
   try {
     const m = await fly.getMachine(app, machineId);
@@ -794,33 +801,83 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
     }
     if (m.state !== "stopped") await fly.stopMachine(app, machineId);
     if (!(await fly.waitMachine(app, machineId, "stopped", 30))) throw new Error("machine did not reach stopped");
-    const v = await fly.getMachine(app, machineId);
-    if (!v || v.state === "destroyed") return "gone";
-    if (v.state !== "stopped") throw new Error("read-back: machine is not stopped");
-    if ((v.config?.services ?? []).some((s: any) => s.autostart !== false) || !v.config) throw new Error("read-back: proxy autostart is still on");
-    return "stopped";
+    let why = "read-back: no reading";
+    for (let i = 0; i < readback.tries; i++) {
+      const v = await fly.getMachine(app, machineId);
+      if (!v || v.state === "destroyed") return "gone";
+      if (v.state !== "stopped") why = "read-back: machine is not stopped";
+      else if (!v.config || !(v.config.services ?? []).every((s: any) => s.autostart === false)) why = "read-back: proxy autostart is still on";
+      else return "stopped";
+      if (i < readback.tries - 1) await new Promise((r) => setTimeout(r, readback.delayMs));
+    }
+    throw new Error(why);
   } catch (err: any) {
     if (err instanceof FlyError && err.status === 404) return "gone";
     throw err;
   }
 }
 
-/** The reverse, for resume: autostart back ON first (a stopped machine is not launched by this), then the caller starts it. */
-async function restoreAutostart(app: string, fly: FlyClient, machineId: string): Promise<void> {
-  const m = await fly.getMachine(app, machineId);
-  if (!m?.config) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
-  if ((m.config.services ?? []).some((s: any) => s.autostart !== true)) {
-    await fly.updateMachine(app, machineId, withAutostart(m.config, true), { skipLaunch: m.state !== "started" });
+/** Estate record for a machine Fly no longer has: visible in health, never re-created behind the operator's back. */
+function markMachineMissing(e: Estate, now: Date): void {
+  logEstate(e, "resume", "the Fly machine behind this estate is gone; retry re-creates it on the existing volume (no second estate is provisioned)", now);
+  e.status = "error";
+  e.error = "machine_missing: the Fly machine behind this estate is gone";
+  e.step = "create_machine";
+  e.machine_id = null;
+  e.suspended_from = null;
+  e.suspended_at = null;
+  e.suspend_pending = null;
+  e.health = { ok: false, checked_at: now.toISOString(), note: "machine_missing: the Fly machine is gone; operator action needed (retry re-creates it on the existing volume)" };
+}
+
+/** Put autostart back OFF on a stopped machine after a resume that could not start it. If even that fails the suspension is flagged for the tick. */
+async function rollbackAutostart(e: Estate, fly: FlyClient, machineId: string, now: Date): Promise<void> {
+  try {
+    const m = await fly.getMachine(e.app, machineId);
+    if (m?.config) await fly.updateMachine(e.app, machineId, withAutostart(m.config, false), { skipLaunch: true });
+    logEstate(e, "resume", "start failed; proxy autostart rolled back to off", now);
+  } catch (err: any) {
+    console.error("estate resume: autostart rollback failed for", e.app, String(err?.message ?? err).slice(0, 300));
+    e.suspend_pending = { reason: "resume failed", since: now.toISOString(), attempts: 0, last_error: SUSPEND_ERR, next_retry_at: new Date(now.getTime() + SUSPEND_BACKOFF_BASE_MS).toISOString(), failed: false };
+    e.health = { ok: false, checked_at: now.toISOString(), note: "suspend pending: a failed resume left the machine needing a quiet-down; retrying" };
+    logEstate(e, "resume", "start failed and the autostart rollback failed too; machine flagged for the tick to quiet down", now);
+    await saveEstate(e, now, { owns: OWN_PENDING });
   }
 }
 
-/** Start the machine again and return to the status it had before suspension. */
+/**
+ * Start the machine again and return to the status it had before suspension. Order matters:
+ * autostart back ON (a stopped machine is not launched by this), then start. If the start fails
+ * the autostart is rolled back to OFF (or, failing that, flagged for the tick), so no failure
+ * leaves a stopped machine with autostart on. A machine Fly no longer has is marked
+ * machine_missing (an error the operator retries), not thrown forever.
+ */
 export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date = new Date()): Promise<Estate> {
   if (e.status !== "suspended") return e;
   if (fly && e.machine_id) {
-    await restoreAutostart(e.app, fly, e.machine_id);
-    await fly.startMachine(e.app, e.machine_id);
-    logEstate(e, "resume", `machine ${e.machine_id} started`, now);
+    const machineId = e.machine_id;
+    let m: Awaited<ReturnType<FlyClient["getMachine"]>> = null;
+    try {
+      m = await fly.getMachine(e.app, machineId);
+    } catch (err: any) {
+      if (!(err instanceof FlyError && err.status === 404)) throw err;
+    }
+    if (!m || m.state === "destroyed") {
+      markMachineMissing(e, now);
+      await saveEstate(e, now, { owns: [...OWN_RESUME, "health", "machine_id", "error", "step"] });
+      return e;
+    }
+    if (!m.config) throw new EstateError(502, "machine_unreadable", "The estate machine could not be read.");
+    if ((m.config.services ?? []).some((s: any) => s.autostart !== true)) {
+      await fly.updateMachine(e.app, machineId, withAutostart(m.config, true), { skipLaunch: m.state !== "started" });
+    }
+    try {
+      await fly.startMachine(e.app, machineId);
+    } catch (err) {
+      await rollbackAutostart(e, fly, machineId, now);
+      throw err;
+    }
+    logEstate(e, "resume", `machine ${machineId} started`, now);
   } else {
     logEstate(e, "resume", "resumed" + (fly ? "" : " (provisioning not configured; nothing to start)"), now);
   }
@@ -833,14 +890,46 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
   return e;
 }
 
+/**
+ * Every machine-config write for an ACTIVE estate (arm, image upgrade, key placement, token renewal)
+ * goes through here. It takes the subscription lock (the same one a cancellation takes), re-reads the
+ * estate INSIDE it and refuses when it is suspended or has a suspension pending, so a stale config
+ * (autostart on) can never land after a completed suspend. With `readCurrent` the machine's current
+ * config is read inside the lock too (never a copy read earlier). Updating a running machine restarts
+ * it, which is the intent here (secrets / image / posture take effect); skip_launch is only for the
+ * suspend / resume paths.
+ */
+export async function updateMachineGuarded(
+  e: Estate,
+  fly: FlyClient,
+  build: (current: MachineConfig | null) => MachineConfig,
+  opts: { readCurrent?: boolean } = {},
+): Promise<void> {
+  const run = async () => {
+    const fresh = await getEstate(e.user_id);
+    if (!fresh || fresh.status === "suspended" || fresh.suspend_pending) {
+      throw new EstateError(409, "estate_suspended", "The estate is suspended or being suspended; its machine config was left unchanged.");
+    }
+    const id = fresh.machine_id ?? e.machine_id;
+    if (!id) throw new EstateError(409, "estate_not_ready", "The estate has no machine.");
+    let current: MachineConfig | null = null;
+    if (opts.readCurrent) {
+      current = (await fly.getMachine(e.app, id))?.config ?? null;
+      if (!current) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
+    }
+    await fly.updateMachine(e.app, id, build(current));
+  };
+  const user = await getUserById(e.user_id);
+  const subId = user?.billing?.subscription_id;
+  return subId ? withSubscriptionLock(subId, run) : run();
+}
+
 /** Place the customer's Anthropic key as an estate secret (never stored in the portal); the machine restarts. */
 export async function setEstateAnthropicKey(e: Estate, fly: FlyClient, key: string, now: Date = new Date()): Promise<Estate> {
   if (e.status !== "ready") throw new EstateError(409, "estate_not_ready", "The estate must be ready before a key can be placed.");
   const k = validateAnthropicKey(key);
   await fly.setSecrets(e.app, { ANTHROPIC_API_KEY: k });
-  const m = await fly.getMachine(e.app, e.machine_id!);
-  if (!m?.config) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
-  await fly.updateMachine(e.app, e.machine_id!, m.config);
+  await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
   e.anthropic_key_set_at = now.toISOString();
   logEstate(e, "anthropic_key", "ANTHROPIC_API_KEY set on the estate; machine restarted to apply", now);
   await saveEstate(e, now);
@@ -983,7 +1072,7 @@ export async function upgradeEstateImage(
   const from = e.image ?? "unknown";
   logEstate(e, "upgrade", `updating the machine image ${from} -> ${target}${opts.force ? " (forced re-apply)" : ""}; armed posture re-verified afterwards`, now);
   await saveEstate(e, now);
-  await fly.updateMachine(e.app, e.machine_id, estateMachineConfig(cfg, e.volume_id, "armed", attestSigner(e.grantor)));
+  await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor)));
 
   const origin = e.url ?? estateOrigin(e.app);
   const polls = opts.polls ?? 60;

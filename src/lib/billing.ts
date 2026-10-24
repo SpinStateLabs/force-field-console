@@ -8,6 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { portalStore } from "./store";
+import { withSubscriptionLock } from "./locks";
 import { getUserById, saveUser, type User, type Tier } from "./users";
 import {
   GRANTING_STATUSES,
@@ -100,35 +101,7 @@ export async function advanceSubscriptionMark(subId: string, created: unknown, s
   throw new Error("subscription mark kept changing; the event will be redelivered");
 }
 
-export const SUB_LOCK_TTL_MS = 60_000;
-export const SUB_LOCK_TRIES = 30;
-export const SUB_LOCK_WAIT_MS = 100;
-
-export async function withSubscriptionLock<T>(subId: string, fn: () => Promise<T>): Promise<T> {
-  const store = await portalStore();
-  const key = "stripe_sub_locks/" + subId;
-  const token = randomUUID();
-  for (let i = 0; i < SUB_LOCK_TRIES; i++) {
-    const now = Date.now();
-    const lock = { token, expires_at: new Date(now + SUB_LOCK_TTL_MS).toISOString() };
-    let got = await store.setJSONIfNew(key, lock);
-    if (!got) {
-      const read = await store.getWithEtag(key);
-      if (read && new Date(read.data?.expires_at ?? 0).getTime() <= now) got = await store.setJSONIfMatch(key, lock, read.etag); // expired: conditional takeover
-      else if (!read) got = await store.setJSONIfNew(key, lock);
-    }
-    if (got) {
-      try {
-        return await fn();
-      } finally {
-        const cur = await store.getWithEtag(key).catch(() => null);
-        if (cur?.data?.token === token) await store.delete(key).catch(() => {});
-      }
-    }
-    await new Promise((r) => setTimeout(r, SUB_LOCK_WAIT_MS));
-  }
-  throw new Error("subscription " + subId + " is busy; the event will be redelivered");
-}
+export { SUB_LOCK_TRIES, SUB_LOCK_TTL_MS, SUB_LOCK_WAIT_MS, withSubscriptionLock } from "./locks";
 
 export async function releaseEvent(eventId: string): Promise<void> {
   const store = await portalStore();
@@ -233,7 +206,7 @@ export async function retryPendingSuspend(
 ): Promise<{ outcome: "suspended" | "pending" | "cleared"; estate: Estate | null }> {
   const run = async () => {
     const fresh = await getEstate(userId);
-    if (!fresh?.suspend_pending || fresh.status === "suspended") return { outcome: "cleared" as const, estate: fresh };
+    if (!fresh?.suspend_pending) return { outcome: "cleared" as const, estate: fresh };
     const u = await getUserById(userId);
     if (u && u.tier !== "sandbox" && u.billing && GRANTING_STATUSES.has(u.billing.status)) {
       await clearSuspendPending(fresh, "subscription is active again (checked by the tick before retrying)", now);
@@ -259,10 +232,23 @@ export function checkoutIdempotencyKey(userId: string, tier: string, customerId:
 }
 
 /** Win the subscription's ordering mark (under its lock), then apply; false when the event is stale. */
-async function applyOrdered(user: User, sub: StripeSubscription, event: any, deps: WebhookDeps): Promise<{ applied: boolean; tier?: Tier }> {
+async function applyOrdered(
+  user: User,
+  sub: StripeSubscription,
+  event: any,
+  deps: WebhookDeps,
+): Promise<{ applied: boolean; tier?: Tier; reason?: "stale" | "other_subscription" }> {
   return withSubscriptionLock(sub.id, async () => {
-    if (!(await advanceSubscriptionMark(sub.id, event?.created, sub.status, String(event?.id ?? "")))) return { applied: false };
+    if (!(await advanceSubscriptionMark(sub.id, event?.created, sub.status, String(event?.id ?? "")))) return { applied: false, reason: "stale" as const };
     const fresh = (await getUserById(user.id)) ?? user; // the user may have changed while we waited for the lock
+    // Only the user's CURRENT subscription may suspend or resume their estate. An event for another
+    // subscription id (a late 'deleted' for the old one after a new one was bought) only advanced its
+    // own mark above. A different subscription is adopted only when it is granting and the current one is not.
+    const cur = fresh.billing;
+    if (cur?.subscription_id && cur.subscription_id !== sub.id) {
+      const incomingGrants = tierForPrice(deps.cfg, subscriptionPriceId(sub)) !== null && GRANTING_STATUSES.has(sub.status);
+      if (!(incomingGrants && !GRANTING_STATUSES.has(cur.status))) return { applied: false, reason: "other_subscription" as const };
+    }
     return { applied: true, tier: await applySubscription(fresh, sub, deps) };
   });
 }
@@ -282,7 +268,7 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
     const sub = await getSubscription(deps.cfg, String(obj.subscription), deps.fetchImpl);
     if (!sub.metadata?.user_id) sub.metadata = { ...(sub.metadata ?? {}), user_id: user.id };
     const r = await applyOrdered(user, sub, event, deps);
-    if (!r.applied) return { handled: false, note: `stale checkout.session.completed for ${sub.id} ignored (out of order)` };
+    if (!r.applied) return { handled: false, note: r.reason === "other_subscription" ? `checkout.session.completed for ${sub.id} ignored (not the user's current subscription)` : `stale checkout.session.completed for ${sub.id} ignored (out of order)` };
     return { handled: true, note: `checkout completed; tier ${r.tier}` };
   }
 
@@ -292,7 +278,7 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
     const user = await userForSubscription(sub);
     if (!user) return { handled: false, note: "no portal user for the subscription" };
     const r = await applyOrdered(user, sub, event, deps);
-    if (!r.applied) return { handled: false, note: `stale ${type} for ${sub.id} ignored (out of order)` };
+    if (!r.applied) return { handled: false, note: r.reason === "other_subscription" ? `${type} for ${sub.id} ignored (not the user's current subscription)` : `stale ${type} for ${sub.id} ignored (out of order)` };
     return { handled: true, note: `${type}; status ${sub.status}; tier ${r.tier}` };
   }
 
