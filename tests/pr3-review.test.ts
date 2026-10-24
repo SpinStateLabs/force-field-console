@@ -143,46 +143,37 @@ describe("MED 1: machine-config writers cannot undo a completed suspend", () => 
   });
 });
 
-describe("MED 2: no resume failure leaves a stopped machine with autostart on", () => {
-  it("start fails: autostart is rolled back to off, the estate stays suspended, the machine stays stopped", async () => {
+describe("MED 2: resume only starts the machine (it never turns autostart on), so no failure leaves a stopped machine with autostart on", () => {
+  it("start fails: the estate stays suspended, the machine stays stopped with autostart off, and no config was written", async () => {
     await estate();
     await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "canceled");
+    fly.log.length = 0;
     fly.failStart = true;
     await expect(resumeEstate((await getEstate(user.id))!, fly as any)).rejects.toThrow();
     expect((await getEstate(user.id))!.status).toBe("suspended");
     expect(fly.machine("m_1").state).toBe("stopped");
     expect(fly.autostartOff("m_1")).toBe(true);
     expect(fly.ping("m_1")).toBe("stopped");
+    expect(fly.log.filter((l) => l.startsWith("update"))).toEqual([]);
   });
 
-  it("start AND the rollback fail: the suspended estate is flagged and the tick's retry quiets the machine", async () => {
-    await estate();
-    await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "canceled");
-    fly.failStart = true;
-    fly.failUpdateAfter = fly.updatesDone + 1; // the autostart-on write succeeds, the rollback does not
-    await expect(resumeEstate((await getEstate(user.id))!, fly as any)).rejects.toThrow();
-    let stored = (await getEstate(user.id))!;
-    expect(stored.status).toBe("suspended");
-    expect(stored.suspend_pending).toBeTruthy();
-    expect(fly.autostartOff("m_1")).toBe(false); // the dangerous state, but flagged
-    fly.failUpdateAfter = null;
-    fly.failStart = false;
-    const r = await retryPendingSuspend(user.id, fly as any, new Date());
-    expect(r.outcome).toBe("suspended");
-    stored = (await getEstate(user.id))!;
-    expect(stored.status).toBe("suspended");
-    expect(stored.suspend_pending ?? null).toBeNull();
-    expect(fly.autostartOff("m_1")).toBe(true);
-    expect(fly.ping("m_1")).toBe("stopped");
-  });
-
-  it("the autostart-on write uses skip_launch for a stopped machine, so the update itself cannot launch it", async () => {
+  it("resume issues the start without any Fly config update (the ~20 s call that outlasted the webhook), and leaves autostart off", async () => {
     await estate();
     await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "canceled");
     fly.log.length = 0;
     await resumeEstate((await getEstate(user.id))!, fly as any);
-    expect(fly.log).toContain("update m_1 autostart=true skip=true");
-    expect(fly.log.findIndex((l) => l.startsWith("update"))).toBeLessThan(fly.log.indexOf("start m_1"));
+    expect(fly.log).toContain("start m_1");
+    expect(fly.log.filter((l) => l.startsWith("update"))).toEqual([]);
+    expect(fly.machine("m_1").state).toBe("started");
+    expect(fly.autostartOff("m_1")).toBe(true);
+  });
+
+  it("the start comes first among the Fly calls (a slow later call cannot keep the machine stopped)", async () => {
+    await estate();
+    await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "canceled");
+    fly.log.length = 0;
+    await resumeEstate((await getEstate(user.id))!, fly as any);
+    expect(fly.log.findIndex((l) => l === "start m_1")).toBeLessThanOrEqual(1); // at most the existence read before it
   });
 });
 
@@ -257,9 +248,10 @@ describe("model-based gaps: multi-service machines, config preservation, skip_la
     expect(fly.ping("m_1")).toBe("stopped");
     for (const k of ["image", "env", "checks", "mounts", "guest", "restart", "metadata"]) expect(after[k]).toEqual((before as any)[k]);
     expect(after.services.map((s: any) => ({ ...s, autostart: undefined }))).toEqual(before.services.map((s: any) => ({ ...s, autostart: undefined })));
-    // and back: every service on again, config still intact
+    // and back: resume only starts the machine - autostart stays off, the rest of the config is untouched
     await resumeEstate((await getEstate(user.id))!, fly as any);
-    expect(fly.machine("m_1").config.services.map((s: any) => s.autostart)).toEqual([true, true, true]);
+    expect(fly.machine("m_1").state).toBe("started");
+    expect(fly.machine("m_1").config.services.map((s: any) => s.autostart)).toEqual([false, false, false]);
     for (const k of ["image", "env", "checks", "mounts", "guest", "restart", "metadata"]) expect(fly.machine("m_1").config[k]).toEqual((before as any)[k]);
   });
 

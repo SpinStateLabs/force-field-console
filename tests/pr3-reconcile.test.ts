@@ -90,7 +90,7 @@ describe("MED a: a re-grant reconciles the real machine instead of clearing the 
     expect((await getEstate(user.id))!.suspend_pending).toBeTruthy();
     fly.waitNever = false;
     await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps());
-    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: false, pending: null, sub: "sub_B", tier: "operator" });
+    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: true, pending: null, sub: "sub_B", tier: "operator" }); // resume only starts: autostart stays off
     expect(fly.ping("m_1")).toBe("started");
   });
 
@@ -103,7 +103,7 @@ describe("MED a: a re-grant reconciles the real machine instead of clearing the 
     fly.waitNever = false;
     statuses.sub_A = "active";
     await handleStripeEvent(ev("a_upd", "customer.subscription.updated", 300, sub("sub_A", "active")), deps());
-    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: false, pending: null });
+    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: true, pending: null });
   });
 
   it("the tick does the same when no further Stripe event comes (paying user, flagged estate, dead machine)", async () => {
@@ -112,7 +112,7 @@ describe("MED a: a re-grant reconciles the real machine instead of clearing the 
     fly.machine("m_1", { state: "stopped" }).config.services[0].autostart = false;
     const body = await tick();
     expect(body.outcomes.resume_retry_ok).toBe(1);
-    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: false, pending: null });
+    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: true, pending: null });
   });
 });
 
@@ -134,7 +134,7 @@ describe("MED b: a resume that failed to start is retried by the tick, bounded, 
     fly.failStart = false;
     const body = await tick();
     expect(body.outcomes.resume_retry_ok).toBe(1);
-    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: false });
+    expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: true });
     expect((await getEstate(user.id))!.resume_pending ?? null).toBeNull();
   });
 

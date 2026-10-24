@@ -124,25 +124,24 @@ describe("a suspended machine stays stopped when the proxy gets a request", () =
     expect(r.status).toBe("suspended");
   });
 
-  it("resume turns autostart back ON before starting the machine; a failed restore does not start it or resume", async () => {
+  it("resume only starts the machine (no config update); a failed start leaves it suspended, stopped, autostart off", async () => {
     await readyEstate();
     const fly = new ModelFly();
     await suspend(fly);
     fly.log.length = 0;
-    fly.failUpdate = true;
+    fly.failStart = true;
     await expect(resumeEstate((await getEstate(user.id))!, fly as any)).rejects.toThrow();
-    expect(fly.log).not.toContain("start m_1");
     expect((await getEstate(user.id))!.status).toBe("suspended");
+    expect(fly.machine("m_1").state).toBe("stopped");
+    expect(fly.autostartOff("m_1")).toBe(true);
 
-    fly.failUpdate = false;
+    fly.failStart = false;
     fly.log.length = 0;
     const back = await resumeEstate((await getEstate(user.id))!, fly as any);
     expect(back.status).toBe("ready");
-    const upd = fly.log.findIndex((l) => l.startsWith("update m_1 autostart=true"));
-    const start = fly.log.findIndex((l) => l === "start m_1");
-    expect(upd).toBeGreaterThanOrEqual(0);
-    expect(start).toBeGreaterThan(upd);
-    expect(fly.machine("m_1").config.services.every((s: any) => s.autostart === true)).toBe(true);
+    expect(fly.log.filter((l) => l.startsWith("update"))).toEqual([]);
+    expect(fly.log).toContain("start m_1");
+    expect(fly.machine("m_1").state).toBe("started");
   });
 });
 

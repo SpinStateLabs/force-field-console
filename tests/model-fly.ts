@@ -126,8 +126,10 @@ export class ModelFly {
     } else this.machine(id).state = "started";
   }
 
-  async waitMachine(_app: string, id: string, state: string): Promise<boolean> {
+  waits: { state: string; timeoutS: number }[] = [];
+  async waitMachine(_app: string, id: string, state: string, timeoutS = 30): Promise<boolean> {
     this.log.push(`wait ${id} ${state}`);
+    this.waits.push({ state, timeoutS });
     await sleep(this.waitDelay);
     if (state === "started" && this.machine(id).state === "starting") await sleep(Math.max(0, this.bootAt - Date.now()) + 2);
     if (this.waitLies) return true;

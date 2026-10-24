@@ -71,7 +71,7 @@ describe("MED 1: one lock per user - A cancelled while B is bought (the live reh
     await sleep(100);
     const b = handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps());
     await Promise.all([a, b]);
-    expect(await final()).toEqual({ estate: "ready", pending: null, sub: "sub_B", tier: "operator", machine: "started", autostartOff: false });
+    expect(await final()).toEqual({ estate: "ready", pending: null, sub: "sub_B", tier: "operator", machine: "started", autostartOff: true });
   });
 
   for (const order of ["A-first", "B-first"] as const) {

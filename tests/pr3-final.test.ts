@@ -9,6 +9,7 @@ import { issueSession, sessionCookie } from "../src/lib/session";
 import { FlyError } from "../src/lib/fly";
 import {
   advanceEstate,
+  WAIT_S,
   ensureMachineRunning,
   getEstate,
   publicEstate,
@@ -36,6 +37,21 @@ class Pinned extends ModelFly {
       this.pinN -= 1;
       this.log.push("get(stale) " + id);
       return structuredClone(this.pinned);
+    }
+    return super.getMachine(a, id);
+  }
+}
+
+/** After `skip` genuine reads, serves the scripted snapshots in order (then genuine reads again). */
+class Scripted extends ModelFly {
+  skip = 1;
+  queue: any[] = [];
+  async getMachine(a: string, id: string) {
+    if (this.skip > 0) {
+      this.skip -= 1;
+    } else if (this.queue.length) {
+      this.log.push("get(scripted) " + id);
+      return structuredClone(this.queue.shift());
     }
     return super.getMachine(a, id);
   }
@@ -81,7 +97,7 @@ describe("MED: the start is accepted before the machine has booted", () => {
     const r = await resumeEstate((await getEstate(user.id))!, fly as any);
     expect(r.status).toBe("ready");
     expect(fly.machine("m_1").state).toBe("started");
-    expect(fly.autostartOff("m_1")).toBe(false);
+    expect(fly.autostartOff("m_1")).toBe(true); // resume only starts: autostart stays off
     expect(fly.log).toContain("wait m_1 started");
   });
 
@@ -140,34 +156,98 @@ describe("LOW: a failed start plus one stale 'started / autostart on' read-back 
 });
 
 describe("ensureMachineRunning, deterministically", () => {
-  it("the read-back is retried: one stale read after the update does not fail it (and needs more than one try)", async () => {
+  it("the read-back is retried: one stale read after the start does not fail it (and needs more than one try)", async () => {
     await estate();
     stopQuietly();
-    fly.staleAfterUpdate = 1;
+    fly.pinned = structuredClone(fly.machine("m_1")); // stopped
+    fly.pinSkip = 1; // the existence read is genuine
+    fly.pinN = 1; // the first read-back read is the stale, pre-start snapshot
     expect(await ensureMachineRunning("a", fly as any, "m_1")).toBe("running");
-    const afterUpdate = fly.log.slice(fly.log.findIndex((l) => l.startsWith("update")));
-    expect(afterUpdate.filter((l) => l.startsWith("get")).length).toBeGreaterThanOrEqual(3); // stale + two agreeing
+    const afterStart = fly.log.slice(fly.log.indexOf("start m_1"));
+    expect(afterStart.filter((l) => l.startsWith("get")).length).toBeGreaterThanOrEqual(3); // stale + two agreeing
   });
 
-  it("a Fly 404 (from the start, or from the update) means the machine is gone", async () => {
+  it("a Fly 404 from the start means the machine is gone", async () => {
     await estate();
     stopQuietly();
     fly.failStartWith = new FlyError(404, "gone");
     expect(await ensureMachineRunning("a", fly as any, "m_1")).toBe("gone");
-    fly.failStartWith = null;
-    fly.updateThrows404 = true;
-    expect(await ensureMachineRunning("a", fly as any, "m_1")).toBe("gone");
   });
 
-  it("an unreadable machine config is refused before anything is written", async () => {
+  it("only the start is issued: no config update, and autostart is left as it was", async () => {
     await estate();
-    fly.machine("m_1").config = undefined;
-    await expect(ensureMachineRunning("a", fly as any, "m_1")).rejects.toThrow(/could not be read/);
-    expect(fly.log.some((l) => l.startsWith("update") || l.startsWith("start"))).toBe(false);
+    stopQuietly();
+    expect(await ensureMachineRunning("a", fly as any, "m_1")).toBe("running");
+    expect(fly.log.some((l) => l.startsWith("update"))).toBe(false);
+    expect(fly.autostartOff("m_1")).toBe(true);
+  });
+
+  it("the wait for 'started' is bounded to WAIT_S seconds", async () => {
+    await estate();
+    stopQuietly();
+    await ensureMachineRunning("a", fly as any, "m_1");
+    expect(fly.waits.filter((w) => w.state === "started").map((w) => w.timeoutS)).toEqual([WAIT_S]);
+  });
+});
+
+describe("the agree counter resets on every disagreement (good, bad, good must not add up to two)", () => {
+  const snap = (state: string, autostart: boolean) => ({ id: "m_1", name: "estate", state, config: { image: "img", services: [{ internal_port: 8080, autostart }] } });
+
+  it("quiesce: stopped / autostart off, then a machine that is NOT stopped, then stopped again: not accepted", async () => {
+    await estate();
+    readback.tries = 3;
+    const s = new Scripted();
+    s.machine("m_1");
+    s.waitLies = true;
+    s.queue = [snap("stopped", false), snap("started", false), snap("stopped", false)];
+    await expect(suspendEstate({ ...(await getEstate(user.id))! }, s as any, new Date(), "canceled")).resolves.toMatchObject({ status: "ready" });
+    expect((await getEstate(user.id))!.suspend_pending).toBeTruthy();
+  });
+
+  it("quiesce: a stopped machine whose autostart is still ON in the middle also resets it", async () => {
+    await estate();
+    readback.tries = 3;
+    const s = new Scripted();
+    s.machine("m_1");
+    s.waitLies = true;
+    s.queue = [snap("stopped", false), snap("stopped", true), snap("stopped", false)];
+    await expect(suspendEstate({ ...(await getEstate(user.id))! }, s as any, new Date(), "canceled")).resolves.toMatchObject({ status: "ready" });
+    expect((await getEstate(user.id))!.suspend_pending).toBeTruthy();
+  });
+
+  it("ensureMachineRunning: started, then NOT started, then started: not accepted; started, started: accepted", async () => {
+    await estate();
+    readback.tries = 3;
+    const s = new Scripted();
+    s.machine("m_1");
+    s.queue = [snap("started", false), snap("stopped", false), snap("started", false)];
+    await expect(ensureMachineRunning("a", s as any, "m_1")).rejects.toBeTruthy();
+    const ok = new Scripted();
+    ok.machine("m_1");
+    ok.queue = [snap("started", false), snap("started", false)];
+    expect(await ensureMachineRunning("a", ok as any, "m_1")).toBe("running");
+  });
+
+  it("the quiesce waits at most WAIT_S seconds for the stop", async () => {
+    await estate();
+    await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "canceled");
+    expect(fly.waits.filter((w) => w.state === "stopped").map((w) => w.timeoutS)).toEqual([WAIT_S]);
   });
 });
 
 describe("no Fly text reaches users", () => {
+  it("an unexpected (non-Fly, non-Estate) error in a provisioning step is stored as fixed generic text", async () => {
+    user.tier = "operator";
+    await saveUser(user);
+    const e = await queueEstate(user);
+    const bad: any = new Proxy({}, { get: () => async () => { throw new TypeError("cannot read properties of undefined (fo1_LEAKME0123456789abcdef) at /apps/ff-est-0123abcd/machines"); } });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await advanceEstate(e, bad);
+    const stored = (await getEstate(user.id))!;
+    expect(stored.error).toBe("an unexpected error occurred; retrying");
+    expect(JSON.stringify(stored)).not.toMatch(FLY_LEAK_RE);
+  });
+
   it("a provisioning step failing with a realistic Fly error: publicEstate error, log and stored record are generic", async () => {
     user.tier = "operator";
     await saveUser(user);

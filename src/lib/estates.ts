@@ -820,6 +820,9 @@ export async function clearSuspendPending(e: Estate, why: string, now: Date = ne
  * Any failure throws, so the caller keeps the suspension pending and retries; the estate is marked
  * suspended only after all of this succeeded. Returns "gone" when Fly no longer has the machine.
  */
+/** The longest the webhook / tick waits for Fly to report a stop or a start (a slow Fly call must not outlast the function limit). */
+export const WAIT_S = 10;
+
 /** Fly reads can lag a write by a moment: the read-back is retried a few times before it counts as failed. */
 export const readback = { tries: 4, delayMs: 400 };
 
@@ -832,7 +835,7 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
       await fly.updateMachine(app, machineId, withAutostart(m.config, false), { skipLaunch: m.state !== "started" });
     }
     if (m.state !== "stopped") await fly.stopMachine(app, machineId);
-    if (!(await fly.waitMachine(app, machineId, "stopped", 30))) throw new Error("machine did not reach stopped");
+    if (!(await fly.waitMachine(app, machineId, "stopped", WAIT_S))) throw new Error("machine did not reach stopped");
     let why = "read-back: no reading";
     let agree = 0;
     for (let i = 0; i < readback.tries; i++) {
@@ -857,28 +860,26 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
 }
 
 /**
- * Make a machine RUN with proxy autostart on, without trusting any single read (Fly reads can lag a
- * write, so a "started / autostart on" reading may be a snapshot from before a stop): the idempotent
- * autostart-on update (no launch) and the start are ALWAYS issued, then the result is verified by
- * read-back (retried for stale reads, like the quiesce). Only a verified machine returns "running"; a
- * machine Fly no longer has returns "gone"; anything else throws and the caller keeps its flag.
+ * Make a machine RUN without trusting any single read (Fly reads can lag a write, so a "started"
+ * reading may be a snapshot from before a stop). Only the START is issued here: the Fly config update
+ * that would turn proxy autostart back on took ~20 s on a live estate and outlasted the webhook's
+ * function limit (the machine was never started), so autostart stays off until the next config
+ * rebuild (estateMachineConfig restores it). A running machine with autostart off is harmless.
+ * After the start (Fly returns once it is ACCEPTED) the call waits, bounded, for "started" and then
+ * needs two consecutive reads to agree. A machine Fly no longer has returns "gone"; anything else
+ * throws and the caller keeps its flag / stays suspended (the tick retries).
  */
 export async function ensureMachineRunning(app: string, fly: FlyClient, machineId: string): Promise<"running" | "gone"> {
   try {
     const m = await fly.getMachine(app, machineId);
     if (!m || m.state === "destroyed") return "gone";
-    if (!m.config) throw new EstateError(502, "machine_unreadable", "The estate machine could not be read.");
-    await fly.updateMachine(app, machineId, withAutostart(m.config, true), { skipLaunch: true });
     let startError: unknown = null;
     try {
       await fly.startMachine(app, machineId);
     } catch (err) {
       startError = err; // a start of a running machine may be refused: the wait + read-back decide
     }
-    // Fly's start returns once the start is ACCEPTED; the machine reads "starting" until it has booted.
-    // Wait (bounded, the same helper the quiesce uses) for "started" BEFORE reading back.
-    if (!(await fly.waitMachine(app, machineId, "started", 30))) throw startError ?? new Error("machine did not reach started");
-    // Two consecutive reads must agree (one stale snapshot must not decide).
+    if (!(await fly.waitMachine(app, machineId, "started", WAIT_S))) throw startError ?? new Error("machine did not reach started");
     let why = "read-back: no reading";
     let agree = 0;
     for (let i = 0; i < readback.tries; i++) {
@@ -886,9 +887,6 @@ export async function ensureMachineRunning(app: string, fly: FlyClient, machineI
       if (!v || v.state === "destroyed") return "gone";
       if (v.state !== "started") {
         why = "read-back: machine is not started";
-        agree = 0;
-      } else if (!v.config || !(v.config.services ?? []).every((s: any) => s.autostart === true)) {
-        why = "read-back: proxy autostart is not on";
         agree = 0;
       } else if (++agree >= 2) {
         return "running";
@@ -960,39 +958,19 @@ export async function reviveEstate(e: Estate, fly: FlyClient | null, now: Date =
   return e;
 }
 
-/** Put autostart back OFF on a stopped machine after a resume that could not start it. If even that fails the suspension is flagged for the tick. */
-async function rollbackAutostart(e: Estate, fly: FlyClient, machineId: string, now: Date): Promise<void> {
-  try {
-    const m = await fly.getMachine(e.app, machineId);
-    if (m?.config) await fly.updateMachine(e.app, machineId, withAutostart(m.config, false), { skipLaunch: true });
-    logEstate(e, "resume", "start failed; proxy autostart rolled back to off", now);
-  } catch (err: any) {
-    console.error("estate resume: autostart rollback failed for", e.app, String(err?.message ?? err).slice(0, 300));
-    e.suspend_pending = { reason: "resume failed", since: now.toISOString(), attempts: 0, last_error: SUSPEND_ERR, next_retry_at: new Date(now.getTime() + SUSPEND_BACKOFF_BASE_MS).toISOString(), failed: false };
-    e.health = { ok: false, checked_at: now.toISOString(), note: "suspend pending: a failed resume left the machine needing a quiet-down; retrying" };
-    logEstate(e, "resume", "start failed and the autostart rollback failed too; machine flagged for the tick to quiet down", now);
-    await saveEstate(e, now, { owns: OWN_PENDING });
-  }
-}
-
 /**
- * Start the machine again and return to the status it had before suspension. Order matters:
- * autostart back ON (a stopped machine is not launched by this), then start. If the start fails
- * the autostart is rolled back to OFF (or, failing that, flagged for the tick), so no failure
- * leaves a stopped machine with autostart on. A machine Fly no longer has is marked
- * machine_missing (an error the operator retries), not thrown forever.
+ * Start the machine again and return to the status it had before suspension. Only the start (plus a
+ * bounded wait and read-back, see ensureMachineRunning) runs here: the Fly config update that would
+ * turn autostart back on took ~20 s on a live estate and outlasted the webhook's function limit, so
+ * autostart stays off until the next config rebuild. A failed start leaves the estate suspended with
+ * the machine stopped and autostart off (suspended-safe); the tick retries. A machine Fly no longer
+ * has is marked machine_missing (an error the operator retries), not thrown forever.
  */
 export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date = new Date()): Promise<Estate> {
   if (e.status !== "suspended") return e;
   if (fly && e.machine_id) {
     const machineId = e.machine_id;
-    let r: "running" | "gone";
-    try {
-      r = await ensureMachineRunning(e.app, fly, machineId);
-    } catch (err) {
-      await rollbackAutostart(e, fly, machineId, now);
-      throw err;
-    }
+    const r = await ensureMachineRunning(e.app, fly, machineId);
     if (r === "gone") {
       markMachineMissing(e, now);
       await saveEstate(e, now, { owns: [...OWN_RESUME, "health", "machine_id", "error", "step"] });

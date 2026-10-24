@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+<!-- Force-Field force-field mark. Redrawn from the 2026-10-01 icon sheet; not source artwork. -->
+<defs><pattern id="g" width="12.5" height="12.5" patternUnits="userSpaceOnUse"><path d="M12.5 0V12.5H0" fill="none" stroke="#141A2C" stroke-width="1"/></pattern></defs>
+<rect x="1" y="1" width="198" height="198" rx="44" fill="#04050C" stroke="#232A40" stroke-width="2"/>
+<rect x="1" y="1" width="198" height="198" rx="44" fill="url(#g)"/>
+<path d="M92 30.46A70 70 0 0 0 92 169.54" fill="none" stroke="#1FDB91" stroke-width="12"/><path d="M108 30.46A70 70 0 0 1 108 169.54" fill="none" stroke="#8C5CF7" stroke-width="12"/><rect x="78" y="58" width="20" height="84" fill="#1FDB91"/><rect x="78" y="58" width="50" height="20" fill="#8C5CF7"/><rect x="78" y="92" width="40" height="18" fill="#8C5CF7"/>
+</svg>

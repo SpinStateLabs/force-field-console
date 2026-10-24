@@ -167,7 +167,7 @@ describe("chaos: random Stripe/Fly faults, stale reads, interleavings", () => {
       const obs = { k, finals, estate: e.status, spend: !!e.suspend_pending, resume: !!e.resume_pending, sub: u.billing?.subscription_id, bst: u.billing?.status, tier: u.tier, machine: fly.machine("m_1").state, autoOff: fly.autostartOff("m_1"), rounds, err: e.error };
       if (process.env.RV_DBG && granting && obs.machine !== "started") console.log("DBG", JSON.stringify({obs, flog: fly.log, elog: e.log.map((l:any)=>l.at+" "+l.step+" "+l.note), deliveries: deliveries.map((d:any)=>d.id+"@"+d.created+":"+d.data.object.status)}, null, 1));
       expect(granting, "billing mirror vs Stripe truth " + JSON.stringify(obs)).toBe(expectGrant);
-      if (granting) expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "ready", spend: false, resume: false, machine: "started", autoOff: false, tier: "operator" });
+      if (granting) expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "ready", spend: false, resume: false, machine: "started", tier: "operator" });
       else expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "suspended", spend: false, machine: "stopped", autoOff: true, tier: "sandbox" });
       expect(fly.ping("m_1")).toBe(granting ? "started" : "stopped");
       const all = await listEstates();

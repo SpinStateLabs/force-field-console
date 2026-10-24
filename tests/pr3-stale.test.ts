@@ -26,6 +26,6 @@ it("stale read in revive: cancel's stop wait times out (flag pending, machine re
   fly.staleReads = 1;
   await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), d());
   const after = (await getEstate(user.id))!;
-  expect({ estate: after.status, pending: after.suspend_pending ?? null, machine: fly.machine("m_1").state, autostartOff: fly.autostartOff("m_1") }).toEqual({ estate: "ready", pending: null, machine: "started", autostartOff: false });
+  expect({ estate: after.status, pending: after.suspend_pending ?? null, machine: fly.machine("m_1").state, autostartOff: fly.autostartOff("m_1") }).toEqual({ estate: "ready", pending: null, machine: "started", autostartOff: true });
   expect(fly.ping("m_1")).toBe("started");
 });

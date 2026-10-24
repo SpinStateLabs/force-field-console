@@ -106,7 +106,7 @@ describe("fuzz interleavings (with and without Fly faults: the wait times out, t
         const u = (await getUserById(user.id))!;
         const granting = sc.bFinal === "active" || sc.bFinal === "past_due";
         const obs = { estate: e.status, pending: !!e.suspend_pending, sub: u.billing?.subscription_id, billingStatus: u.billing?.status, machine: fly.machine("m_1").state, autostartOff: fly.autostartOff("m_1"), tier: u.tier };
-        if (granting) expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "ready", pending: false, machine: "started", autostartOff: false, sub: "sub_B", tier: "operator" });
+        if (granting) expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "ready", pending: false, machine: "started", sub: "sub_B", tier: "operator" });
         else expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "suspended", pending: false, machine: "stopped", autostartOff: true, tier: "sandbox" });
         expect(fly.ping("m_1")).toBe(granting ? "started" : "stopped");
       }, 30000);
