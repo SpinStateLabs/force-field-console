@@ -9,7 +9,7 @@
 // machine so the processes restart with them (about a minute of downtime).
 // Token ids never land on the estate record.
 
-import { EstateError, SELF_AGENTS, estateSecret, lastJsonLine, logEstate, redactSecret, saveEstate, type Estate } from "./estates";
+import { EstateError, SELF_AGENTS, estateSecret, lastJsonLine, logEstate, redactSecret, saveEstate, updateMachineGuarded, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export const RENEW_AFTER_DAYS = 25;
@@ -57,9 +57,7 @@ export async function renewSelfAgents(e: Estate, fly: FlyClient, now: Date = new
     secrets[agent.secret] = String(out.token_id);
   }
   await fly.setSecrets(e.app, secrets);
-  const m = await fly.getMachine(e.app, e.machine_id);
-  if (!m?.config) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
-  await fly.updateMachine(e.app, e.machine_id, m.config);
+  await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
   for (const agent of SELF_AGENTS) e.self_agents[agent.id] = { provisioned_at: now.toISOString() };
   logEstate(e, "renew", "self-agent tokens renewed (30 d) and applied; machine restarted", now);
   await saveEstate(e, now);

@@ -392,11 +392,28 @@ export function stepStatus(statusKey, ctx) {
     const bits = [];
     bits.push("Estate status: " + String(estate.status));
     if (estate.health) bits.push("last health check: " + (estate.health.ok ? "ok" : "PROBLEM") + (estate.health.note ? " (" + estate.health.note + ")" : "") + (estate.health.checked_at ? " as of " + estate.health.checked_at : ""));
-    if (estate.suspend_pending) bits.push("suspension pending");
+    if (estate.suspend_pending) bits.push(estate.suspend_pending.failed ? "suspension FAILED (needs Spin State Labs)" : "suspension pending");
+    if (estate.resume_pending) bits.push(estate.resume_pending.failed ? "resume FAILED (needs Spin State Labs)" : "resume pending");
     if (estate.image) bits.push("engine image: " + estate.image);
     if (estate.upgrade_failed_image) bits.push("rollout HALTED for image " + estate.upgrade_failed_image);
-    const bad = estate.upgrade_failed_image || (estate.health && !estate.health.ok);
+    const bad = estate.upgrade_failed_image || (estate.health && !estate.health.ok) || (estate.suspend_pending && estate.suspend_pending.failed) || (estate.resume_pending && estate.resume_pending.failed);
     return { kind: bad ? "err" : "info", label: bad ? "needs attention" : "as reported", text: bits.join(" · ") };
+  }
+  // States the durable-suspend work can produce, each with its own honest copy (never "subscription not active"
+  // for a paying customer, never "provisioning failed" for a gone machine).
+  if (estate.resume_pending) {
+    if (!estate.resume_pending.failed && !estate.resume_pending.attempts) {
+      return { kind: "warn", label: "resuming", text: "Your subscription is active: your estate starts within about 2 minutes (a scheduled check starts it). Commands are refused (403 estate_suspended) until it runs." };
+    }
+    return estate.resume_pending.failed
+      ? { kind: "err", label: "resume failed", text: "Your subscription is active, but the estate's machine could not be restarted automatically. Spin State Labs needs to step in. Commands are refused (403 estate_suspended) until the machine runs." }
+      : { kind: "warn", label: "resuming", text: "Your subscription is active and the estate's machine is being restarted (retried automatically). Commands are refused (403 estate_suspended) until it runs." };
+  }
+  if (estate.status === "error" && /^machine_missing/.test(String(estate.error || ""))) {
+    return { kind: "err", label: "machine missing", text: "The machine behind your estate is gone; your data volume is kept. Retry from the dashboard re-creates the machine on it (no second estate is provisioned)." };
+  }
+  if (estate.suspend_pending && estate.suspend_pending.failed) {
+    return { kind: "err", label: "suspension failed", text: "The estate's suspension could not be completed automatically. Spin State Labs needs to step in. Commands are refused (403 estate_suspended)." };
   }
   if (estate.status === "ready" && estate.suspend_pending) {
     return { kind: "warn", label: "being suspended", text: "Your estate is being suspended (the subscription is not active). Commands will be refused by the gateway (403 estate_suspended) until billing is reactivated." };

@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import handler from "../netlify/functions/billing.mts";
+import { ModelFly, machinesApiHandler } from './model-fly';
 import { freshStore } from "./helpers";
 import { createUser, getUserById, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { signPayload, stripeConfig } from "../src/lib/stripe";
-import { STALE_CLAIM_MS, alreadyProcessed, claimEvent, handleStripeEvent, markProcessed } from "../src/lib/billing";
+import { STALE_CLAIM_MS, alreadyProcessed, claimEvent, handleStripeEvent, markProcessed, retryPendingSuspend } from "../src/lib/billing";
 import { getEstate, queueEstate, saveEstate } from "../src/lib/estates";
 
 const ctx = {} as any;
@@ -25,10 +26,10 @@ function sub(over: Partial<any> = {}, userId?: string) {
   };
 }
 
-class StopFly {
+class StopFly extends ModelFly {
   calls: string[] = [];
-  async stopMachine(app: string, id: string) { this.calls.push(`stop ${app} ${id}`); }
-  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); }
+  async stopMachine(app: string, id: string) { this.calls.push(`stop ${app} ${id}`); await super.stopMachine(app, id); }
+  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); await super.startMachine(app, id); }
 }
 
 async function cookieFor(user: User): Promise<string> {
@@ -110,6 +111,8 @@ describe("stripe webhook state transitions", () => {
       { cfg: stripeConfig()!, fly: fly as any },
     );
     expect((await getUserById(user.id))!.tier).toBe("operator");
+    expect((await getEstate(user.id))!.resume_pending).toBeTruthy(); // queued, not started inline
+    await retryPendingSuspend(user.id, fly as any, new Date());
     expect((await getEstate(user.id))!.status).toBe("ready");
     expect(fly.calls[1]).toBe(`start ${e.app} m_1`);
   });

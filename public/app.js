@@ -403,7 +403,19 @@ function renderEstate(e, configured) {
     suspended: "Suspended: the subscription is not active. The machine is stopped and the data is kept; reactivate billing to resume.",
     error: "Provisioning failed. The last error is shown below; retry once the cause is fixed, or contact Spin State Labs.",
   };
-  $("estate-note").textContent = notes[e.status] || "";
+  let note = notes[e.status] || "";
+  if (e.resume_pending) {
+    note = e.resume_pending.failed
+      ? "Your subscription is active, but the estate's machine could not be restarted automatically. Spin State Labs needs to step in."
+      : e.resume_pending.attempts
+        ? "Your subscription is active; the estate's machine is being restarted (retried automatically)."
+        : "Resume pending: your estate starts within about 2 minutes.";
+  } else if (e.status === "error" && /^machine_missing/.test(String(e.error || ""))) {
+    note = "The machine behind your estate is gone; your data volume is kept. Retry re-creates the machine on it.";
+  } else if (e.suspend_pending) {
+    note = e.suspend_pending.failed ? "The estate's suspension could not be completed automatically; Spin State Labs needs to step in." : "The estate is being suspended (the subscription is not active).";
+  }
+  $("estate-note").textContent = note;
 
   // steps
   const steps = Array.isArray(e.steps) ? e.steps.filter((s) => s !== "done") : [];

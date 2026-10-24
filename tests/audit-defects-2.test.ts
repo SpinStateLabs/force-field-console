@@ -4,6 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import billingHandler from "../netlify/functions/billing.mts";
 import healthHandler from "../netlify/functions/health.mts";
 import tickHandler from "../netlify/functions/estate-tick.mts";
+import { ModelFly, machinesApiHandler } from './model-fly';
 import { MemStore, freshStore } from "./helpers";
 import { setStoreForTesting } from "../src/lib/store";
 import { createUser, getUserById, type User } from "../src/lib/users";
@@ -39,14 +40,15 @@ function sub(over: Partial<any> = {}, userId?: string) {
   };
 }
 
-class StopFly {
+class StopFly extends ModelFly {
   calls: string[] = [];
   stopError: Error | null = null;
   async stopMachine(app: string, id: string) {
     this.calls.push(`stop ${app} ${id}`);
     if (this.stopError) throw this.stopError;
+    await super.stopMachine(app, id);
   }
-  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); }
+  async startMachine(app: string, id: string) { this.calls.push(`start ${app} ${id}`); await super.startMachine(app, id); }
 }
 
 /** A store that lets a test land a competing write between a caller's read and its write. */

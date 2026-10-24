@@ -63,7 +63,7 @@ export async function runWorker(
   userId: string,
   action: WorkerAction,
   fly: FlyClient,
-  opts: { budgetMs?: number; sleepMs?: number; fetchImpl?: FetchLike; sleep?: (ms: number) => Promise<void> } = {},
+  opts: { budgetMs?: number; sleepMs?: number; fetchImpl?: FetchLike; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
 ): Promise<WorkerResult> {
   const budgetMs = opts.budgetMs ?? WORKER_BUDGET_MS;
   const sleepMs = opts.sleepMs ?? 5000;
@@ -77,7 +77,8 @@ export async function runWorker(
   // machine of a READY estate and must never interleave (a renew's restart
   // could otherwise re-apply the pre-upgrade config).
   if (workerActive(e)) return { iterations: 0, last: "worker_active", status: e.status };
-  const started = Date.now();
+  const clock = opts.now ?? Date.now;
+  const started = clock();
   e.worker_until = new Date(started + budgetMs + 60_000).toISOString();
   await saveEstate(e);
 
@@ -115,7 +116,7 @@ export async function runWorker(
   let last: AdvanceOutcome = "idle";
   let status: string = e.status;
   try {
-    while (Date.now() - started < budgetMs) {
+    while (clock() - started < budgetMs) {
       const cur = await getEstate(userId);
       if (!cur) break;
       const r = await advanceEstate(cur, fly, { fetchImpl: opts.fetchImpl });

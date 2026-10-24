@@ -94,8 +94,12 @@ describe("worker loop", () => {
   it("stops at the budget and clears the lease", async () => {
     await queueEstate(user);
     const fly = new LoopFly();
-    const r = await runWorker(user.id, "advance", fly as any, { fetchImpl: async () => new Response("", { status: 503 }), sleep: async () => {}, budgetMs: 1 });
-    expect(r.iterations).toBeGreaterThanOrEqual(1);
+    // An injected clock (1000 ms per reading) makes the budget deterministic: started at 0, loop checks read
+    // 1000, 2000, 3000 (inside a 3500 ms budget) and 4000 (over it): exactly three iterations.
+    let t = -1000;
+    const clock = () => (t += 1000);
+    const r = await runWorker(user.id, "advance", fly as any, { fetchImpl: async () => new Response("", { status: 503 }), sleep: async () => {}, budgetMs: 3500, now: clock });
+    expect(r.iterations).toBe(3);
     expect((await getEstate(user.id))!.worker_until).toBeNull();
   });
 
