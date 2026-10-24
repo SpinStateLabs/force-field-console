@@ -261,10 +261,11 @@ export class FlyClient {
   }
 
   /** Replace the config (a full config is required); the machine restarts and picks up the current secrets. */
-  async updateMachine(app: string, id: string, config: MachineConfig): Promise<Machine> {
+  async updateMachine(app: string, id: string, config: MachineConfig, opts: { skipLaunch?: boolean } = {}): Promise<Machine> {
     return (await this.restOk("POST", `/apps/${encodeURIComponent(app)}/machines/${encodeURIComponent(id)}`, {
       config,
       region: this.cfg.region,
+      ...(opts.skipLaunch ? { skip_launch: true } : {}),
     })) as Machine;
   }
 
@@ -375,6 +376,14 @@ export function estateMachineConfig(
     restart: { policy: "always" },
     metadata: { "ff-portal": "estate" },
   };
+}
+
+/**
+ * A copy of the config with every service's proxy autostart set. A suspended estate must not be
+ * woken by an inbound request (Fly's proxy starts a stopped machine when autostart is on).
+ */
+export function withAutostart(config: MachineConfig, autostart: boolean): MachineConfig {
+  return { ...config, services: (config.services ?? []).map((s) => ({ ...s, autostart })) };
 }
 
 /** A client when provisioning is configured, else null (the honest 501 path). */

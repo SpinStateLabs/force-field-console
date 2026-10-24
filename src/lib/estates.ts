@@ -18,7 +18,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { env, portalStore } from "./store";
 import type { User } from "./users";
-import { FlyError, estateMachineConfig, estateOrigin, flyConfig, type FetchLike, type FlyClient } from "./fly";
+import { FlyError, estateMachineConfig, estateOrigin, flyConfig, withAutostart, type FetchLike, type FlyClient } from "./fly";
 
 export type EstateStatus = "pending_manual" | "provisioning" | "ready" | "suspended" | "error";
 
@@ -740,6 +740,7 @@ export async function suspendEstate(
     try {
       await fly.stopMachine(e.app, machineId);
       logEstate(e, "suspend", `machine ${machineId} stopped: ${reason}`, now);
+      await setAutostart(e, fly, machineId, false, now);
     } catch (err: any) {
       if (err instanceof FlyError && err.status === 404) {
         logEstate(e, "suspend", `machine ${machineId} not found on Fly (already stopped or gone): ${reason}`, now);
@@ -770,10 +771,29 @@ export async function clearSuspendPending(e: Estate, why: string, now: Date = ne
   return e;
 }
 
+/**
+ * Flip the proxy autostart on a stopped machine without launching it, so an inbound request cannot
+ * wake a suspended estate. Best effort: the gateway refuses suspended estates regardless.
+ */
+async function setAutostart(e: Estate, fly: FlyClient, machineId: string, autostart: boolean, now: Date): Promise<void> {
+  const step = autostart ? "resume" : "suspend";
+  try {
+    if (!autostart) await fly.waitMachine(e.app, machineId, "stopped", 30);
+    const m = await fly.getMachine(e.app, machineId);
+    if (!m?.config) throw new Error("machine config unreadable");
+    await fly.updateMachine(e.app, machineId, withAutostart(m.config, autostart), { skipLaunch: true });
+    logEstate(e, step, `proxy autostart ${autostart ? "restored" : "disabled"}`, now);
+  } catch (err: any) {
+    console.error("estate autostart switch failed for", e.app, String(err?.message ?? err).slice(0, 300));
+    logEstate(e, step, `proxy autostart ${autostart ? "restore" : "disable"} failed`, now);
+  }
+}
+
 /** Start the machine again and return to the status it had before suspension. */
 export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date = new Date()): Promise<Estate> {
   if (e.status !== "suspended") return e;
   if (fly && e.machine_id) {
+    await setAutostart(e, fly, e.machine_id, true, now);
     await fly.startMachine(e.app, e.machine_id);
     logEstate(e, "resume", `machine ${e.machine_id} started`, now);
   } else {

@@ -97,8 +97,9 @@ class FakeFly {
     return m;
   }
   async getMachine(app: string, id: string) { this.rec("getMachine", app, id); return this.machines[app]?.find((m) => m.id === id) ?? null; }
-  async updateMachine(app: string, id: string, config: any) {
-    this.rec("updateMachine", app, id);
+  async waitMachine(app: string, id: string, state: string) { this.rec("waitMachine", app, id, state); return true; }
+  async updateMachine(app: string, id: string, config: any, opts: any = {}) {
+    this.rec("updateMachine", app, id, opts);
     const m = this.machines[app]?.find((x) => x.id === id);
     if (m) m.config = config;
     return m;
@@ -329,14 +330,33 @@ describe("dedicated estates", () => {
     e.url = `https://${e.app}.fly.dev`;
     await saveEstate(e);
     const fly = new FakeFly();
+    fly.machines[e.app] = [{ id: "m_1", name: "estate", config: { image: "img", services: [{ internal_port: 8080, autostart: true }] } }];
     const s = await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
     expect(s.status).toBe("suspended");
     expect(s.suspended_from).toBe("ready");
-    expect(fly.calls).toEqual([{ m: "stopMachine", args: [e.app, "m_1"] }]);
+    // stop, then switch the proxy autostart off on the stopped machine without launching it
+    expect(fly.calls.map((c) => c.m)).toEqual(["stopMachine", "waitMachine", "getMachine", "updateMachine"]);
+    expect(fly.calls[3].args[2]).toEqual({ skipLaunch: true });
+    expect(fly.machines[e.app][0].config.services[0].autostart).toBe(false);
     const back = await resumeEstate((await getEstate(user.id))!, fly as any);
     expect(back.status).toBe("ready");
     expect(back.suspended_at).toBeNull();
-    expect(fly.calls[1]).toEqual({ m: "startMachine", args: [e.app, "m_1"] });
+    // autostart is restored before the machine is started
+    expect(fly.calls.slice(4).map((c) => c.m)).toEqual(["getMachine", "updateMachine", "startMachine"]);
+    expect(fly.machines[e.app][0].config.services[0].autostart).toBe(true);
+  });
+
+  it("still marks the estate suspended when the autostart switch fails", async () => {
+    const e = await queueEstate(user);
+    e.status = "ready";
+    e.step = "done";
+    e.machine_id = "m_1";
+    await saveEstate(e);
+    const fly = new FakeFly();
+    fly.failOn.getMachine = 1;
+    const s = await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
+    expect(s.status).toBe("suspended");
+    expect(fly.count("stopMachine")).toBe(1);
   });
 
   it("places the Anthropic key as an estate secret, restarts the machine and stores only the time", async () => {
