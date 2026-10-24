@@ -217,6 +217,13 @@ describe("review fixes", () => {
     expect(failed.label).toBe("resume failed");
     expect(failed.text).toMatch(/Spin State Labs needs to step in/);
   });
+  it("a freshly queued resume says the estate starts within about 2 minutes", () => {
+    const s = stepStatus("estate-ready", est({ status: "suspended", resume_pending: { attempts: 0, failed: false, next_retry_at: null } }));
+    expect(s.kind).toBe("warn");
+    expect(s.label).toBe("resuming");
+    expect(s.text).toMatch(/within about 2 minutes/);
+    expect(s.text).not.toMatch(/not active/i);
+  });
   it("a gone machine is not reported as a provisioning failure", () => {
     const s = stepStatus("estate-ready", est({ status: "error", error: "machine_missing: the Fly machine behind this estate is gone" }));
     expect(s.kind).toBe("err");

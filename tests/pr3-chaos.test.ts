@@ -80,8 +80,8 @@ afterEach(() => {
 });
 
 // The full 320-case sweep takes ~2 minutes (RV_N=320). By default: the first 40 cases plus the seeds that
-// once failed (stale reads in revive: 22, 51, 125, 139, 287).
-const CASES = process.env.RV_N ? Array.from({ length: Number(process.env.RV_N) }, (_, i) => i) : [...new Set([...Array.from({ length: 40 }, (_, i) => i), 22, 51, 125, 139, 287])];
+// once failed (stale reads in revive: 22, 51, 125, 139, 287; the orphaned resume start: 162).
+const CASES = process.env.RV_N ? Array.from({ length: Number(process.env.RV_N) }, (_, i) => i) : [...new Set([...Array.from({ length: 40 }, (_, i) => i), 22, 51, 125, 139, 162, 287])];
 describe("chaos: random Stripe/Fly faults, stale reads, interleavings", () => {
   for (const k of CASES)
     it(`case ${k}`, async () => {

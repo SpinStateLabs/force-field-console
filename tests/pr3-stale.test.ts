@@ -3,7 +3,7 @@ import { ModelFly } from "./model-fly";
 import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
 import { stripeConfig } from "../src/lib/stripe";
-import { handleStripeEvent } from "../src/lib/billing";
+import { handleStripeEvent, retryPendingSuspend } from "../src/lib/billing";
 import { getEstate, queueEstate, readback, saveEstate } from "../src/lib/estates";
 const ENV = { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_OPERATOR: "price_op", STRIPE_PRICE_SOVEREIGN: "price_sov", FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:new", ESTATE_SECRET_MASTER: "master-0123456789" };
 let user: User; let fly: ModelFly; const orig = readback.delayMs;
@@ -25,6 +25,7 @@ it("stale read in revive: cancel's stop wait times out (flag pending, machine re
   // Fly's read-after-write lag: the next reads return the snapshot taken before the latest update (started, autostart on)
   fly.staleReads = 1;
   await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), d());
+  await retryPendingSuspend(user.id, fly as any, new Date()); // the webhook queues the resume, the tick revives
   const after = (await getEstate(user.id))!;
   expect({ estate: after.status, pending: after.suspend_pending ?? null, machine: fly.machine("m_1").state, autostartOff: fly.autostartOff("m_1") }).toEqual({ estate: "ready", pending: null, machine: "started", autostartOff: true });
   expect(fly.ping("m_1")).toBe("started");

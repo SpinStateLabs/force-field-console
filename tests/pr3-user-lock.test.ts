@@ -71,6 +71,7 @@ describe("MED 1: one lock per user - A cancelled while B is bought (the live reh
     await sleep(100);
     const b = handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps());
     await Promise.all([a, b]);
+    await retryPendingSuspend(user.id, fly as any, new Date());
     expect(await final()).toEqual({ estate: "ready", pending: null, sub: "sub_B", tier: "operator", machine: "started", autostartOff: true });
   });
 
@@ -84,6 +85,7 @@ describe("MED 1: one lock per user - A cancelled while B is bought (the live reh
       const a = () => handleStripeEvent(ev("a_del", "customer.subscription.deleted", 200, sub("sub_A", "canceled")), deps());
       const b = () => handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps());
       await Promise.all(order === "A-first" ? [a(), b()] : [b(), a()]);
+      await retryPendingSuspend(user.id, fly as any, new Date());
       const f = await final();
       expect(f).toMatchObject({ estate: "ready", sub: "sub_B", tier: "operator", pending: null });
       expect(f.machine).toBe("started");
@@ -97,8 +99,10 @@ describe("MED 1: one lock per user - A cancelled while B is bought (the live reh
     statuses.sub_B = "active";
     const events = [ev("a_del", "customer.subscription.deleted", 200, sub("sub_A", "canceled")), ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active"))];
     for (const e of events) await handleStripeEvent(e, deps());
+    await retryPendingSuspend(user.id, fly as any, new Date());
     const before = await final();
     for (const e of [...events, ...events]) await handleStripeEvent(e, deps());
+    await retryPendingSuspend(user.id, fly as any, new Date());
     expect(await final()).toEqual(before);
     expect(before).toMatchObject({ estate: "ready", sub: "sub_B", tier: "operator" });
   });

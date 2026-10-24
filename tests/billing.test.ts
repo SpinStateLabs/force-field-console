@@ -5,7 +5,7 @@ import { freshStore } from "./helpers";
 import { createUser, getUserById, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { signPayload, stripeConfig } from "../src/lib/stripe";
-import { STALE_CLAIM_MS, alreadyProcessed, claimEvent, handleStripeEvent, markProcessed } from "../src/lib/billing";
+import { STALE_CLAIM_MS, alreadyProcessed, claimEvent, handleStripeEvent, markProcessed, retryPendingSuspend } from "../src/lib/billing";
 import { getEstate, queueEstate, saveEstate } from "../src/lib/estates";
 
 const ctx = {} as any;
@@ -111,6 +111,8 @@ describe("stripe webhook state transitions", () => {
       { cfg: stripeConfig()!, fly: fly as any },
     );
     expect((await getUserById(user.id))!.tier).toBe("operator");
+    expect((await getEstate(user.id))!.resume_pending).toBeTruthy(); // queued, not started inline
+    await retryPendingSuspend(user.id, fly as any, new Date());
     expect((await getEstate(user.id))!.status).toBe("ready");
     expect(fly.calls[1]).toBe(`start ${e.app} m_1`);
   });

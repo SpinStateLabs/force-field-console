@@ -90,6 +90,10 @@ describe("MED a: a re-grant reconciles the real machine instead of clearing the 
     expect((await getEstate(user.id))!.suspend_pending).toBeTruthy();
     fly.waitNever = false;
     await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps());
+    // the webhook only QUEUES the resume (no Fly call inline); the tick does the start
+    expect((await getEstate(user.id))!.resume_pending).toBeTruthy();
+    expect(fly.machine("m_1").state).toBe("stopped");
+    await retryPendingSuspend(user.id, fly as any, new Date()); // the webhook only queues the resume; the tick starts the machine
     expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: true, pending: null, sub: "sub_B", tier: "operator" }); // resume only starts: autostart stays off
     expect(fly.ping("m_1")).toBe("started");
   });
@@ -103,6 +107,7 @@ describe("MED a: a re-grant reconciles the real machine instead of clearing the 
     fly.waitNever = false;
     statuses.sub_A = "active";
     await handleStripeEvent(ev("a_upd", "customer.subscription.updated", 300, sub("sub_A", "active")), deps());
+    await retryPendingSuspend(user.id, fly as any, new Date()); // the webhook only queues the resume; the tick starts the machine
     expect(await final()).toMatchObject({ estate: "ready", machine: "started", autostartOff: true, pending: null });
   });
 
@@ -125,7 +130,7 @@ describe("MED b: a resume that failed to start is retried by the tick, bounded, 
     expect((await getEstate(user.id))!.status).toBe("suspended");
     fly.failStart = true;
     statuses.sub_B = "active";
-    await expect(handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps())).rejects.toThrow();
+    await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps()); // queues the resume, no Fly call
     expect(await final()).toMatchObject({ estate: "suspended", machine: "stopped", autostartOff: true, sub: "sub_B", tier: "operator" });
   }
 

@@ -8,6 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { portalStore } from "./store";
+import { saveEstate } from "./estates";
 import { withUserLock } from "./locks";
 import { getUserById, saveUser, type User, type Tier } from "./users";
 import {
@@ -20,7 +21,7 @@ import {
   type StripeConfig,
   type StripeSubscription,
 } from "./stripe";
-import { getEstate, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, suspendEstate, type Estate } from "./estates";
+import { getEstate, markResumePending, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export type WebhookDeps = {
@@ -183,13 +184,24 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   const store = await portalStore();
   await store.setJSON("stripe_customers/" + sub.customer, { user_id: user.id });
 
+  // Fly calls that stay INLINE in the webhook (Netlify's function limit is unverified; one Fly call was
+  // observed at ~20 s, so nothing slow may sit between the event and a persisted decision):
+  //  - GRANTING: none. A paying customer's estate is only MARKED resume_pending (store writes); the
+  //    scheduled tick (every 2 minutes) starts the machine. Worst case inline: a few blob writes.
+  //  - CANCEL: suspendEstate. The pending flag is persisted BEFORE the first Fly call, then at most
+  //    getMachine + [config update] + stop + wait (<= WAIT_S) + up to 4 read-backs, under a 20 s time
+  //    budget (quiesceBudget) checked between calls; a call in flight can add up to its own 20 s Fly
+  //    timeout. If the function limit cuts it off, the state is a retryable suspend_pending, never lost.
   if (granting) {
     const estate = await queueEstate(user, now);
-    if (estate.status === "suspended") await resumeEstate(estate, deps.fly, now);
-    else if (estate.suspend_pending) await reviveEstate(estate, deps.fly, now);
+    if (estate.status === "suspended" || estate.suspend_pending) {
+      if (deps.fly && estate.machine_id) await markResumePending(estate, now, "the subscription is active again");
+      else if (estate.status === "suspended") await resumeEstate(estate, deps.fly, now); // nothing on Fly to start
+    }
   } else {
     const estate = await getEstate(user.id);
-    if (estate && (estate.status === "ready" || estate.status === "provisioning" || estate.status === "error")) {
+    // "suspended" is included: suspendEstate verifies the machine really is stopped instead of trusting the record
+    if (estate && (estate.status === "ready" || estate.status === "provisioning" || estate.status === "error" || estate.status === "suspended")) {
       await suspendEstate(estate, deps.fly, now, `subscription ${sub.status}`);
     }
   }
@@ -219,7 +231,7 @@ export async function retryPendingSuspend(
 ): Promise<{ outcome: "suspended" | "pending" | "cleared" | "resumed" | "resume_failed"; estate: Estate | null }> {
   const run = async () => {
     const fresh = await getEstate(userId);
-    if (!fresh || (!fresh.suspend_pending && fresh.status !== "suspended")) return { outcome: "cleared" as const, estate: fresh };
+    if (!fresh || (!fresh.suspend_pending && !fresh.resume_pending && fresh.status !== "suspended")) return { outcome: "cleared" as const, estate: fresh };
     const u = await getUserById(userId);
     if (isGrantingUser(u)) {
       try {
@@ -232,6 +244,12 @@ export async function retryPendingSuspend(
       }
       const stored = await getEstate(userId);
       return { outcome: stored?.status === "ready" ? ("resumed" as const) : ("resume_failed" as const), estate: stored };
+    }
+    if (fresh.resume_pending && !fresh.suspend_pending) {
+      // the customer stopped paying while a resume was still queued: the resume intent is stale
+      fresh.resume_pending = null;
+      if (fresh.health && /^resume (pending|failed)/.test(fresh.health.note)) fresh.health = null;
+      await saveEstate(fresh, now, { owns: ["resume_pending", "health"] as any });
     }
     if (!fresh.suspend_pending) return { outcome: "cleared" as const, estate: fresh };
     const r = await suspendEstate(fresh, fly, now, fresh.suspend_pending.reason, { requirePending: true });

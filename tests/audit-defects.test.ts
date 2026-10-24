@@ -9,7 +9,7 @@ import { freshStore } from "./helpers";
 import { createUser, getUserById, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { stripeConfig } from "../src/lib/stripe";
-import { STALE_CLAIM_MS, claimEvent, handleStripeEvent } from "../src/lib/billing";
+import { STALE_CLAIM_MS, claimEvent, handleStripeEvent, retryPendingSuspend } from "../src/lib/billing";
 import { getEstate, publicEstate, queueEstate, resolveRoute, resumeEstate, saveEstate, suspendEstate, advanceEstate } from "../src/lib/estates";
 
 const ctx = {} as any;
@@ -176,6 +176,7 @@ describe("defect 2: a failed stop never marks the estate suspended", () => {
     expect(cur.status).toBe("ready");
     expect((cur as any).suspend_pending).toBeTruthy();
     await handleStripeEvent({ id: "r", type: "customer.subscription.updated", created: 20, data: { object: sub({ status: "active" }, user.id) } }, deps);
+    await retryPendingSuspend(user.id, fly as any, new Date()); // the tick checks the machine and clears the flag
     cur = (await getEstate(user.id))!;
     expect(cur.status).toBe("ready");
     expect((cur as any).suspend_pending).toBeNull();

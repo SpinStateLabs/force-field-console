@@ -209,6 +209,7 @@ describe("MED 4: only the user's CURRENT subscription may suspend or resume", ()
     await handleStripeEvent(ev("a_cancel", "customer.subscription.updated", 100, sub("sub_A", "canceled", user.id)), deps);
     expect((await getEstate(user.id))!.status).toBe("suspended");
     await handleStripeEvent(ev("b_new", "customer.subscription.created", 150, sub("sub_B", "active", user.id)), deps);
+    await retryPendingSuspend(user.id, fly as any, new Date()); // the tick starts the machine the webhook queued
     expect((await getEstate(user.id))!.status).toBe("ready");
     expect((await getUserById(user.id))!.billing!.subscription_id).toBe("sub_B");
 

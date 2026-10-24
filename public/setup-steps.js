@@ -402,6 +402,9 @@ export function stepStatus(statusKey, ctx) {
   // States the durable-suspend work can produce, each with its own honest copy (never "subscription not active"
   // for a paying customer, never "provisioning failed" for a gone machine).
   if (estate.resume_pending) {
+    if (!estate.resume_pending.failed && !estate.resume_pending.attempts) {
+      return { kind: "warn", label: "resuming", text: "Your subscription is active: your estate starts within about 2 minutes (a scheduled check starts it). Commands are refused (403 estate_suspended) until it runs." };
+    }
     return estate.resume_pending.failed
       ? { kind: "err", label: "resume failed", text: "Your subscription is active, but the estate's machine could not be restarted automatically. Spin State Labs needs to step in. Commands are refused (403 estate_suspended) until the machine runs." }
       : { kind: "warn", label: "resuming", text: "Your subscription is active and the estate's machine is being restarted (retried automatically). Commands are refused (403 estate_suspended) until it runs." };

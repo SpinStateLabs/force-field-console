@@ -177,7 +177,7 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
 }
 
 type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step" | "resume_pending";
-const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health"];
+const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health", "resume_pending"];
 const OWN_PENDING: readonly OwnedField[] = ["suspend_pending", "health"];
 const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "resume_pending", "health"];
 const OWN_RESUME_PENDING: readonly OwnedField[] = ["resume_pending", "health"];
@@ -707,7 +707,19 @@ export async function suspendEstate(
   opts: { requirePending?: boolean } = {},
 ): Promise<Estate> {
   // A suspended estate with a pending flag is one whose machine still needs quieting (a failed resume rollback).
-  if (e.status === "suspended" && !e.suspend_pending) return e;
+  if (e.status === "suspended" && !e.suspend_pending) {
+    // The record says suspended: verify it against the machine instead of trusting it (a resume whose start
+    // landed but whose wait / read-back failed leaves a RUNNING machine behind a suspended record).
+    if (!fly || !e.machine_id) return e;
+    let seen: Awaited<ReturnType<FlyClient["getMachine"]>> = null;
+    try {
+      seen = await fly.getMachine(e.app, e.machine_id);
+    } catch (err: any) {
+      if (!(err instanceof FlyError && err.status === 404)) throw err;
+    }
+    if (!seen || seen.state === "destroyed" || seen.state === "stopped") return e;
+    logEstate(e, "suspend", "the record says suspended but the machine is running; quieting it down", now);
+  }
   const onlyIf = opts.requirePending ? (cur: Estate) => Boolean(cur.suspend_pending) : undefined;
   const flag = (failed: boolean, attempts: number, note: string, next: Date | null, prior: SuspendPending | null | undefined) => {
     e.suspend_pending = {
@@ -772,7 +784,7 @@ export async function suspendEstate(
   }
   if (fly && machineId) {
     try {
-      const r = await quiesceMachine(e.app, fly, machineId);
+      const r = await quiesceMachine(e.app, fly, machineId, Date.now() + quiesceBudget.ms);
       logEstate(
         e,
         "suspend",
@@ -794,7 +806,8 @@ export async function suspendEstate(
     e.suspended_at = now.toISOString();
   }
   e.suspend_pending = null;
-  if (e.health && /^suspend (pending|failed)/.test(e.health.note)) e.health = null;
+  e.resume_pending = null;
+  if (e.health && /^(suspend|resume) (pending|failed)/.test(e.health.note)) e.health = null;
   await saveEstate(e, now, { owns: discovered ? [...OWN_SUSPEND, "machine_id"] : OWN_SUSPEND, onlyIf });
   return e;
 }
@@ -826,19 +839,31 @@ export const WAIT_S = 10;
 /** Fly reads can lag a write by a moment: the read-back is retried a few times before it counts as failed. */
 export const readback = { tries: 4, delayMs: 400 };
 
-export async function quiesceMachine(app: string, fly: FlyClient, machineId: string): Promise<"stopped" | "gone"> {
+/** Time budget of one inline quiesce (the webhook's cancel path); the tick's retries get the same. */
+export const quiesceBudget = { ms: 20_000 };
+
+export async function quiesceMachine(app: string, fly: FlyClient, machineId: string, deadline?: number): Promise<"stopped" | "gone"> {
+  // The webhook's cancel path runs this inline, so it has a time budget (the suspension is already persisted
+  // as pending before the first Fly call; running out of budget leaves a retryable pending state for the tick).
+  const over = () => {
+    if (deadline !== undefined && Date.now() > deadline) throw new Error("quiesce time budget exceeded");
+  };
   try {
     const m = await fly.getMachine(app, machineId);
     if (!m || m.state === "destroyed") return "gone";
     if (!m.config) throw new Error("machine config unreadable");
+    over();
     if ((m.config.services ?? []).some((s: any) => s.autostart !== false)) {
       await fly.updateMachine(app, machineId, withAutostart(m.config, false), { skipLaunch: m.state !== "started" });
     }
+    over();
     if (m.state !== "stopped") await fly.stopMachine(app, machineId);
+    over();
     if (!(await fly.waitMachine(app, machineId, "stopped", WAIT_S))) throw new Error("machine did not reach stopped");
     let why = "read-back: no reading";
     let agree = 0;
     for (let i = 0; i < readback.tries; i++) {
+      over();
       const v = await fly.getMachine(app, machineId);
       if (!v || v.state === "destroyed") return "gone";
       if (v.state !== "stopped") {
@@ -935,13 +960,26 @@ export async function recordResumeFailure(e: Estate, now: Date, err: unknown): P
 }
 
 /**
+ * Record that a paying customer's machine still has to be STARTED (the tick does it, within about two
+ * minutes). Persisted under the caller's user lock; it never touches Fly.
+ */
+export async function markResumePending(e: Estate, now: Date, why: string): Promise<Estate> {
+  if (e.resume_pending) return e;
+  e.resume_pending = { since: now.toISOString(), attempts: 0, last_error: "", next_retry_at: null, failed: false };
+  e.health = { ok: false, checked_at: now.toISOString(), note: `resume pending: ${why}; a scheduled check starts the machine within about 2 minutes` };
+  logEstate(e, "resume", `resume pending: ${why}`, now);
+  await saveEstate(e, now, { owns: OWN_RESUME_PENDING });
+  return e;
+}
+
+/**
  * A paying customer's estate that still carries a suspension flag (the stop was started, perhaps
  * even completed, before the subscription came back): the flag alone proves nothing about the
  * machine. Read it; gone -> machine_missing; autostart off or not running -> autostart on, then
  * start. Only then is the flag cleared. A failure throws and leaves the flag (retried by the tick).
  */
 export async function reviveEstate(e: Estate, fly: FlyClient | null, now: Date = new Date()): Promise<Estate> {
-  if (!e.suspend_pending) return e;
+  if (!e.suspend_pending && !e.resume_pending) return e;
   if (fly && e.machine_id) {
     const r = await ensureMachineRunning(e.app, fly, e.machine_id);
     if (r === "gone") {
@@ -970,7 +1008,19 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
   if (e.status !== "suspended") return e;
   if (fly && e.machine_id) {
     const machineId = e.machine_id;
-    const r = await ensureMachineRunning(e.app, fly, machineId);
+    let r: "running" | "gone";
+    try {
+      r = await ensureMachineRunning(e.app, fly, machineId);
+    } catch (err) {
+      // The start may have landed even though the wait / read-back did not confirm it: the machine can be
+      // RUNNING behind a suspended record. Flag the estate so it can be quieted down (a later cancel, or the
+      // tick) instead of leaving it looking suspended while it bills.
+      e.suspend_pending = { reason: "resume not confirmed", since: now.toISOString(), attempts: 0, last_error: SUSPEND_ERR, next_retry_at: new Date(now.getTime() + SUSPEND_BACKOFF_BASE_MS).toISOString(), failed: false };
+      e.health = { ok: false, checked_at: now.toISOString(), note: "suspend pending: a resume could not be confirmed; the machine will be checked" };
+      logEstate(e, "resume", "start not confirmed; the machine is flagged so it can be quieted down if the subscription ends", now);
+      await saveEstate(e, now, { owns: OWN_PENDING });
+      throw err;
+    }
     if (r === "gone") {
       markMachineMissing(e, now);
       await saveEstate(e, now, { owns: [...OWN_RESUME, "health", "machine_id", "error", "step"] });

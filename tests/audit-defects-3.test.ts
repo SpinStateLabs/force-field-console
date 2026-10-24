@@ -12,7 +12,7 @@ import { createUser, getUserById, saveUser, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { stripeConfig } from "../src/lib/stripe";
 import { FlyError } from "../src/lib/fly";
-import { advanceSubscriptionMark, claimCheckout, handleStripeEvent, releaseCheckout, withSubscriptionLock } from "../src/lib/billing";
+import { advanceSubscriptionMark, claimCheckout, handleStripeEvent, releaseCheckout, retryPendingSuspend, withSubscriptionLock } from "../src/lib/billing";
 import { clearSuspendPending, getEstate, queueEstate, saveEstate, suspendEstate, type Estate } from "../src/lib/estates";
 
 const ctx = {} as any;
@@ -113,6 +113,7 @@ describe("MED: the tick's suspend retry cannot override a reactivation", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+    await retryPendingSuspend(user.id, webhookFly as any, new Date()); // the webhook queued the resume; the next tick starts it
     const e = (await getEstate(user.id))!;
     expect({ status: e.status, pending: e.suspend_pending ?? null, tier: (await getUserById(user.id))!.tier }).toEqual({ status: "ready", pending: null, tier: "operator" });
     // the machine the tick stopped is started again by the reactivation (the lock ordered them)

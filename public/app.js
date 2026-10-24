@@ -407,7 +407,9 @@ function renderEstate(e, configured) {
   if (e.resume_pending) {
     note = e.resume_pending.failed
       ? "Your subscription is active, but the estate's machine could not be restarted automatically. Spin State Labs needs to step in."
-      : "Your subscription is active; the estate's machine is being restarted (retried automatically).";
+      : e.resume_pending.attempts
+        ? "Your subscription is active; the estate's machine is being restarted (retried automatically)."
+        : "Resume pending: your estate starts within about 2 minutes.";
   } else if (e.status === "error" && /^machine_missing/.test(String(e.error || ""))) {
     note = "The machine behind your estate is gone; your data volume is kept. Retry re-creates the machine on it.";
   } else if (e.suspend_pending) {
