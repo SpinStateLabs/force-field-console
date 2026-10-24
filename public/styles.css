@@ -634,14 +634,14 @@ td {
 .panel-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.8rem 0; }
 .sub-title { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
 .hint { color: var(--muted); font-size: 0.9rem; }
-.steps { list-style: none; padding: 0; margin: 0.8rem 0; display: grid; gap: 0.25rem; }
-.steps li { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: var(--muted); }
-.steps li::before { content: "\25CB"; width: 1.2em; display: inline-block; text-align: center; }
-.steps li.done { color: inherit; }
-.steps li.done::before { content: "\2713"; color: var(--ok, #2ecc71); }
-.steps li.current { color: inherit; font-weight: 600; }
-.steps li.current::before { content: "\25B6"; color: var(--purp, #7c5cff); }
-.steps li.failed::before { content: "\2717"; color: var(--err, #ff3d5a); }
+.progress-steps { list-style: none; padding: 0; margin: 0.8rem 0; display: grid; gap: 0.25rem; }
+.progress-steps li { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: var(--muted); }
+.progress-steps li::before { content: "\25CB"; width: 1.2em; display: inline-block; text-align: center; }
+.progress-steps li.done { color: inherit; }
+.progress-steps li.done::before { content: "\2713"; color: var(--ok, #2ecc71); }
+.progress-steps li.current { color: inherit; font-weight: 600; }
+.progress-steps li.current::before { content: "\25B6"; color: var(--purp, #7c5cff); }
+.progress-steps li.failed::before { content: "\2717"; color: var(--err, #ff3d5a); }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0.8rem 0; font-size: 0.85rem; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-all; }
