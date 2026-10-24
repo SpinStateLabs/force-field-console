@@ -98,7 +98,10 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     }
   } catch (e: any) {
     if (e instanceof EstateError) return err(e.status, e.code, e.message);
-    if (e instanceof FlyError) return err(502, "fly_error", `Fly refused the request: ${e.message}`);
+    if (e instanceof FlyError) {
+      console.error("estate endpoint: Fly request failed:", pathname, String(e.message).slice(0, 300)); // detail stays in the server log
+      return err(502, "fly_error", "Fly refused or failed the request; try again shortly.");
+    }
     throw e;
   }
 

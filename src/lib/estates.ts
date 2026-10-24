@@ -632,7 +632,15 @@ export async function advanceEstate(
   } catch (err: any) {
     e.attempts += 1;
     e.polls = 0; // a fresh polling window per attempt
-    e.error = redactSecret(String(err?.message ?? err), cfg ? estateSecret(e.app) : null).slice(0, 400);
+    // User-visible text is fixed and generic for anything that came from Fly (app names, machine ids, URLs and
+    // tokens can ride in its error text); the detail goes to the server log only, truncated.
+    console.error("estate provision: step", step, "failed for", e.app, redactSecret(String(err?.message ?? err), cfg ? estateSecret(e.app) : null).slice(0, 300));
+    e.error =
+      err instanceof EstateError
+        ? redactSecret(err.message, cfg ? estateSecret(e.app) : null).slice(0, 400)
+        : err instanceof FlyError
+          ? "the Fly API refused or failed the request; retrying"
+          : "an unexpected error occurred; retrying";
     logEstate(e, step, `attempt ${e.attempts} failed: ${e.error}`, now);
     if (e.attempts >= MAX_ATTEMPTS) {
       e.status = "error";
@@ -826,12 +834,19 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
     if (m.state !== "stopped") await fly.stopMachine(app, machineId);
     if (!(await fly.waitMachine(app, machineId, "stopped", 30))) throw new Error("machine did not reach stopped");
     let why = "read-back: no reading";
+    let agree = 0;
     for (let i = 0; i < readback.tries; i++) {
       const v = await fly.getMachine(app, machineId);
       if (!v || v.state === "destroyed") return "gone";
-      if (v.state !== "stopped") why = "read-back: machine is not stopped";
-      else if (!v.config || !(v.config.services ?? []).every((s: any) => s.autostart === false)) why = "read-back: proxy autostart is still on";
-      else return "stopped";
+      if (v.state !== "stopped") {
+        why = "read-back: machine is not stopped";
+        agree = 0;
+      } else if (!v.config || !(v.config.services ?? []).every((s: any) => s.autostart === false)) {
+        why = "read-back: proxy autostart is still on";
+        agree = 0;
+      } else if (++agree >= 2) {
+        return "stopped"; // two consecutive reads agree
+      }
       if (i < readback.tries - 1) await new Promise((r) => setTimeout(r, readback.delayMs));
     }
     throw new Error(why);
@@ -858,15 +873,26 @@ export async function ensureMachineRunning(app: string, fly: FlyClient, machineI
     try {
       await fly.startMachine(app, machineId);
     } catch (err) {
-      startError = err; // the read-back below decides (a start of a running machine may be refused)
+      startError = err; // a start of a running machine may be refused: the wait + read-back decide
     }
+    // Fly's start returns once the start is ACCEPTED; the machine reads "starting" until it has booted.
+    // Wait (bounded, the same helper the quiesce uses) for "started" BEFORE reading back.
+    if (!(await fly.waitMachine(app, machineId, "started", 30))) throw startError ?? new Error("machine did not reach started");
+    // Two consecutive reads must agree (one stale snapshot must not decide).
     let why = "read-back: no reading";
+    let agree = 0;
     for (let i = 0; i < readback.tries; i++) {
       const v = await fly.getMachine(app, machineId);
       if (!v || v.state === "destroyed") return "gone";
-      if (v.state !== "started") why = "read-back: machine is not started";
-      else if (!v.config || !(v.config.services ?? []).every((s: any) => s.autostart === true)) why = "read-back: proxy autostart is not on";
-      else return "running";
+      if (v.state !== "started") {
+        why = "read-back: machine is not started";
+        agree = 0;
+      } else if (!v.config || !(v.config.services ?? []).every((s: any) => s.autostart === true)) {
+        why = "read-back: proxy autostart is not on";
+        agree = 0;
+      } else if (++agree >= 2) {
+        return "running";
+      }
       if (i < readback.tries - 1) await new Promise((r) => setTimeout(r, readback.delayMs));
     }
     throw startError ?? new Error(why);

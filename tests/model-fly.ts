@@ -47,6 +47,9 @@ export class ModelFly {
   updatesDone = 0;
   failStop = false;
   failStart = false;
+  failStartWith: Error | null = null;
+  bootMs = 0; // start is accepted at once, the machine reads "starting" until it has booted
+  private bootAt = 0;
   failGet = false;
   failStopWith: Error | null = null;
   ignoreUpdate = false; // Fly answers 200 but does not apply the change (read-back must catch it)
@@ -66,6 +69,7 @@ export class ModelFly {
 
   machine(id: string, over: Partial<ModelMachine> & { autostart?: boolean } = {}): ModelMachine {
     let m = this.machines.get(id);
+    if (m && m.state === "starting" && Date.now() >= this.bootAt) m.state = "started";
     if (!m) {
       m = { id, name: "estate", state: over.state ?? "started", config: over.config ?? { image: "img", services: [{ internal_port: 8080, autostart: over.autostart ?? true }] } };
       this.machines.set(id, m);
@@ -114,13 +118,18 @@ export class ModelFly {
   async startMachine(_app: string, id: string): Promise<void> {
     this.log.push("start " + id);
     await sleep(this.startDelay);
+    if (this.failStartWith) throw this.failStartWith;
     if (this.failStart) throw flyErr(503, "start", id);
-    this.machine(id).state = "started";
+    if (this.bootMs > 0) {
+      this.machine(id).state = "starting";
+      this.bootAt = Date.now() + this.bootMs;
+    } else this.machine(id).state = "started";
   }
 
   async waitMachine(_app: string, id: string, state: string): Promise<boolean> {
     this.log.push(`wait ${id} ${state}`);
     await sleep(this.waitDelay);
+    if (state === "started" && this.machine(id).state === "starting") await sleep(Math.max(0, this.bootAt - Date.now()) + 2);
     if (this.waitLies) return true;
     return !this.waitNever && this.machine(id).state === state;
   }
