@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Force-Field Console — Estate setup</title>
+<meta name="description" content="Step-by-step setup for your dedicated Force-Field estate: roster, keys, agent, token, governed call, attestation pack and ledger.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="setup-body">
+
+<a class="skip-link" href="#setup-main">Skip to the step</a>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="logo" href="index.html">Force-Field <span class="logo-dot" aria-hidden="true">&#9679;</span> Console</a>
+    <div class="nav-links">
+      <a href="app.html">Dashboard</a>
+      <a href="setup.html" aria-current="page">Estate setup</a>
+      <a href="https://github.com/SpinStateLabs/Force-Field">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container setup-layout">
+
+  <aside class="setup-side" aria-label="Setup steps">
+    <details id="setup-nav-wrap" class="setup-nav-wrap" open>
+      <summary id="setup-nav-summary">All steps</summary>
+      <ol id="setup-nav" class="setup-nav"></ol>
+    </details>
+  </aside>
+
+  <main id="setup-main" class="setup-main">
+    <noscript><p class="error-box">This page needs JavaScript to show the steps. The same steps are in the
+      <a href="https://github.com/SpinStateLabs/force-field-console/blob/main/docs/estate-quickstart.md">dedicated-estate quickstart</a>.</p></noscript>
+    <div id="setup-status-line" class="setup-account" role="status"></div>
+    <div id="setup-content" tabindex="-1"></div>
+  </main>
+
+</div>
+
+<div id="setup-live" class="visually-hidden" role="status" aria-live="polite"></div>
+
+<footer class="footer">
+  <p>Spin State Labs &middot; Force-Field Protocol</p>
+</footer>
+
+<script type="module" src="setup.js"></script>
+</body>
+</html>

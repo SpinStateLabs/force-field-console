@@ -651,3 +651,50 @@ td {
 .chip-muted { background: rgba(128, 128, 128, 0.15); color: var(--muted); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .panel-highlight { outline: 2px solid var(--purp, #7c5cff); outline-offset: 2px; }
+
+/* ============================================================
+   Estate setup pages (setup.html). Reuses the console tokens above.
+   Body text uses --text2 / --text (not --muted) for contrast.
+   ============================================================ */
+.skip-link { position: absolute; left: -999px; top: 0; background: var(--bg3); color: var(--text); padding: 0.5rem 0.9rem; z-index: 50; }
+.skip-link:focus { left: 0.5rem; top: 0.5rem; }
+.setup-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 2rem; padding-top: 2rem; padding-bottom: 3rem; align-items: start; }
+.setup-side { position: sticky; top: 4rem; max-height: calc(100vh - 5rem); overflow-y: auto; }
+.setup-nav-wrap summary { cursor: pointer; font-family: var(--font-display); font-weight: 600; margin-bottom: 0.6rem; }
+.setup-nav { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.15rem; }
+.setup-nav-link { display: flex; gap: 0.6rem; align-items: baseline; padding: 0.4rem 0.6rem; border-radius: 6px; color: var(--text2); border-left: 2px solid transparent; font-size: 0.85rem; line-height: 1.35; }
+.setup-nav-link:hover { background: var(--bg2); text-decoration: none; color: var(--text); }
+.setup-nav-link.current { background: var(--bg3); color: var(--text); border-left-color: var(--teal); }
+.setup-nav-num { min-width: 1.9rem; color: var(--purp); font-weight: 600; }
+.setup-nav-mark { margin-left: auto; color: var(--teal); }
+.setup-main { min-width: 0; }
+#setup-content:focus { outline: none; }
+.setup-account { font-size: 0.82rem; margin-bottom: 1rem; color: var(--text2); }
+.setup-h1 { font-size: 1.9rem; margin: 0.2rem 0 0.8rem; }
+.setup-lead { color: var(--text2); font-size: 1rem; }
+.setup-hint { color: var(--text2); font-size: 0.85rem; }
+.setup-pos { margin: 0 0 0.4rem; }
+.setup-progress { width: 100%; height: 6px; margin: 0 0 1rem; accent-color: var(--teal); }
+.setup-status { border-left: 3px solid var(--purp2); margin: 1rem 0 1.25rem; }
+.setup-status-head { margin: 0 0 0.4rem; }
+.setup-status .kv { margin: 0.4rem 0 0.8rem; }
+.setup-list { margin: 0; padding-left: 1.2rem; color: var(--text2); }
+.setup-list li { margin-bottom: 0.45rem; }
+.setup-split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.25rem 0; }
+.setup-split .card { margin: 0; }
+.setup-ops { border-left: 3px solid var(--purp); margin: 1rem 0; }
+.setup-cmd-label { font-size: 1rem; margin: 1.1rem 0 0.4rem; }
+.cmd-block { margin-bottom: 0.9rem; }
+.cmd-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-bottom: 0.3rem; }
+.cmd-title { margin: 0; font-size: 0.82rem; color: var(--text2); font-weight: 600; }
+.cmd-block pre.code { margin-bottom: 0.3rem; }
+.setup-pager { display: flex; justify-content: space-between; gap: 0.8rem; flex-wrap: wrap; margin-top: 2rem; }
+.setup-overview { padding-left: 1.4rem; display: grid; gap: 0.5rem; }
+.setup-overview li::marker { color: var(--purp); }
+@media (max-width: 720px) {
+  .setup-layout { grid-template-columns: minmax(0, 1fr); gap: 1rem; padding-top: 1rem; }
+  .setup-side { position: static; max-height: none; background: var(--bg1); border: 1px solid var(--bdr); border-radius: 8px; padding: 0.7rem; }
+  .setup-split { grid-template-columns: 1fr; }
+  .setup-h1 { font-size: 1.5rem; }
+  .setup-pager .btn { width: 100%; text-align: center; }
+}
