@@ -341,9 +341,9 @@ describe("dedicated estates", () => {
     const back = await resumeEstate((await getEstate(user.id))!, fly as any);
     expect(back.status).toBe("ready");
     expect(back.suspended_at).toBeNull();
-    // autostart is restored before the machine is started
-    expect(fly.calls.slice(4).map((c) => c.m)).toEqual(["getMachine", "updateMachine", "startMachine"]);
-    expect(fly.machines[e.app][0].config.services[0].autostart).toBe(true);
+    // resume only starts the machine: no slow Fly config call stands between the webhook and the start
+    expect(fly.calls.slice(4).map((c) => c.m)).toEqual(["startMachine"]);
+    expect(fly.machines[e.app][0].config.services[0].autostart).toBe(false);
   });
 
   it("still marks the estate suspended when the autostart switch fails", async () => {
