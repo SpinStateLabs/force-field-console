@@ -17,8 +17,8 @@
 
 import { createHash, createHmac } from "node:crypto";
 import { env, portalStore } from "./store";
-import { getUserById, type User } from "./users";
-import { withSubscriptionLock } from "./locks";
+import type { User } from "./users";
+import { withUserLock } from "./locks";
 import { FlyError, estateMachineConfig, estateOrigin, flyConfig, withAutostart, type FetchLike, type FlyClient, type MachineConfig } from "./fly";
 
 export type EstateStatus = "pending_manual" | "provisioning" | "ready" | "suspended" | "error";
@@ -738,6 +738,13 @@ export async function suspendEstate(
     return saveEstate(e, now, { owns: OWN_PENDING, onlyIf }).then(() => e);
   }
 
+  if (fly && machineId && !e.suspend_pending) {
+    // Visible BEFORE the slow part: from here on the gateway refuses and the guarded config writers
+    // refuse, so nothing can slip in while the machine is being quieted.
+    flag(false, 0, "suspend pending: the machine is being stopped", new Date(now.getTime() + SUSPEND_BACKOFF_BASE_MS), null);
+    logEstate(e, "suspend", `suspension started: ${reason}`, now);
+    await saveEstate(e, now, { owns: OWN_PENDING, onlyIf });
+  }
   if (fly && machineId) {
     try {
       const r = await quiesceMachine(e.app, fly, machineId);
@@ -919,9 +926,7 @@ export async function updateMachineGuarded(
     }
     await fly.updateMachine(e.app, id, build(current));
   };
-  const user = await getUserById(e.user_id);
-  const subId = user?.billing?.subscription_id;
-  return subId ? withSubscriptionLock(subId, run) : run();
+  return withUserLock(e.user_id, run);
 }
 
 /** Place the customer's Anthropic key as an estate secret (never stored in the portal); the machine restarts. */

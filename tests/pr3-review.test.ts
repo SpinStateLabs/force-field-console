@@ -230,15 +230,19 @@ describe("MED 4: only the user's CURRENT subscription may suspend or resume", ()
     expect(fly.log.filter((l) => l === "stop m_1").length).toBe(stops);
   });
 
-  it("a second ACTIVE subscription does not displace the current active one; the current one's cancellation still suspends", async () => {
+  it("a second ACTIVE subscription does not displace the current one, but is remembered: when the current one is cancelled it takes over and the estate is NOT suspended", async () => {
     await payingUser("sub_A");
     await estate();
-    const deps = { cfg: stripeConfig()!, fly: fly as any };
+    const fetchImpl = (async (u: any) => new Response(JSON.stringify(sub(String(u).split("/").pop()!, "active", user.id)), { status: 200 })) as any;
+    const deps = { cfg: stripeConfig()!, fly: fly as any, fetchImpl };
     const other = await handleStripeEvent(ev("b_new", "customer.subscription.created", 150, sub("sub_B", "active", user.id)), deps);
     expect(other.handled).toBe(false);
     expect((await getUserById(user.id))!.billing!.subscription_id).toBe("sub_A");
     await handleStripeEvent(ev("a_del", "customer.subscription.deleted", 200, sub("sub_A", "canceled", user.id)), deps);
-    expect((await getEstate(user.id))!.status).toBe("suspended");
+    expect((await getEstate(user.id))!.status).toBe("ready");
+    expect((await getUserById(user.id))!.billing!.subscription_id).toBe("sub_B");
+    expect((await getUserById(user.id))!.tier).toBe("operator");
+    expect(fly.log).not.toContain("stop m_1");
   });
 });
 

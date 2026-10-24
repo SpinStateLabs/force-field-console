@@ -27,6 +27,8 @@ export type Billing = {
   tier: Tier;
   current_period_end: string | null;
   updated_at: string;
+  /** Other granting subscriptions of this customer seen while another one was current (adopted when the current one ends). */
+  other_subs?: Record<string, { status: string; price_id: string | null }>;
 };
 
 export type User = {

@@ -8,7 +8,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { portalStore } from "./store";
-import { withSubscriptionLock } from "./locks";
+import { withUserLock } from "./locks";
 import { getUserById, saveUser, type User, type Tier } from "./users";
 import {
   GRANTING_STATUSES,
@@ -101,7 +101,7 @@ export async function advanceSubscriptionMark(subId: string, created: unknown, s
   throw new Error("subscription mark kept changing; the event will be redelivered");
 }
 
-export { SUB_LOCK_TRIES, SUB_LOCK_TTL_MS, SUB_LOCK_WAIT_MS, withSubscriptionLock } from "./locks";
+export { SUB_LOCK_TRIES, SUB_LOCK_TTL_MS, SUB_LOCK_WAIT_MS, withSubscriptionLock, withUserLock } from "./locks";
 
 export async function releaseEvent(eventId: string): Promise<void> {
   const store = await portalStore();
@@ -166,6 +166,8 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   const tier: Tier = granting ? paidTier! : "sandbox";
   const periodEnd = subscriptionPeriodEnd(sub);
 
+  const carried = { ...(user.billing?.other_subs ?? {}) };
+  delete carried[sub.id];
   user.tier = tier;
   user.billing = {
     customer_id: String(sub.customer),
@@ -175,6 +177,7 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     tier,
     current_period_end: periodEnd ? new Date(periodEnd * 1000).toISOString() : null,
     updated_at: now.toISOString(),
+    ...(Object.keys(carried).length ? { other_subs: carried } : {}),
   };
   await saveUser(user);
   const store = await portalStore();
@@ -194,7 +197,7 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
 }
 
 /**
- * The tick's retry of a pending suspension. Runs under the same per-subscription lock as the
+ * The tick's retry of a pending suspension. Runs under the same per-USER lock as the
  * webhook, re-reads the estate and the user's billing INSIDE it, and drops the retry when the
  * subscription is paying again; the stop and its write are further conditional on the
  * suspension still being pending in the stored record (see suspendEstate requirePending).
@@ -216,9 +219,7 @@ export async function retryPendingSuspend(
     const stored = (await getEstate(userId)) ?? r;
     return { outcome: stored.status === "suspended" ? ("suspended" as const) : stored.suspend_pending ? ("pending" as const) : ("cleared" as const), estate: stored };
   };
-  const user = await getUserById(userId);
-  const subId = user?.billing?.subscription_id;
-  return subId ? withSubscriptionLock(subId, run) : run();
+  return withUserLock(userId, run);
 }
 
 /**
@@ -231,23 +232,50 @@ export function checkoutIdempotencyKey(userId: string, tier: string, customerId:
   return "checkout-" + createHash("sha256").update(`${userId}|${tier}|${customerId ?? ""}|${bucket}`).digest("hex").slice(0, 32);
 }
 
-/** Win the subscription's ordering mark (under its lock), then apply; false when the event is stale. */
+const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s)) !== null && GRANTING_STATUSES.has(s.status);
+
+/**
+ * Win the subscription's ordering mark, then apply, all under the user's lock (one lock per user,
+ * so events for different subscriptions of one customer exclude each other). Rules:
+ *  - only the user's CURRENT subscription suspends or resumes the estate;
+ *  - an event for another subscription is tracked (granting ones are remembered in billing.other_subs,
+ *    others forgotten) and changes nothing else; a granting one is ADOPTED when the current one no
+ *    longer grants;
+ *  - when the current subscription stops granting, another remembered granting subscription (verified
+ *    with Stripe) takes over instead of the estate being suspended.
+ * Returns applied=false (reason) for stale or tracked-only events.
+ */
 async function applyOrdered(
   user: User,
   sub: StripeSubscription,
   event: any,
   deps: WebhookDeps,
 ): Promise<{ applied: boolean; tier?: Tier; reason?: "stale" | "other_subscription" }> {
-  return withSubscriptionLock(sub.id, async () => {
+  return withUserLock(user.id, async () => {
     if (!(await advanceSubscriptionMark(sub.id, event?.created, sub.status, String(event?.id ?? "")))) return { applied: false, reason: "stale" as const };
     const fresh = (await getUserById(user.id)) ?? user; // the user may have changed while we waited for the lock
-    // Only the user's CURRENT subscription may suspend or resume their estate. An event for another
-    // subscription id (a late 'deleted' for the old one after a new one was bought) only advanced its
-    // own mark above. A different subscription is adopted only when it is granting and the current one is not.
     const cur = fresh.billing;
-    if (cur?.subscription_id && cur.subscription_id !== sub.id) {
-      const incomingGrants = tierForPrice(deps.cfg, subscriptionPriceId(sub)) !== null && GRANTING_STATUSES.has(sub.status);
-      if (!(incomingGrants && !GRANTING_STATUSES.has(cur.status))) return { applied: false, reason: "other_subscription" as const };
+    if (cur?.subscription_id && cur.subscription_id !== sub.id && !(grantsTier(deps, sub) && !GRANTING_STATUSES.has(cur.status))) {
+      const others = { ...(cur.other_subs ?? {}) };
+      if (grantsTier(deps, sub)) others[sub.id] = { status: sub.status, price_id: subscriptionPriceId(sub) };
+      else delete others[sub.id];
+      fresh.billing = { ...cur, other_subs: Object.keys(others).length ? others : undefined };
+      await saveUser(fresh);
+      return { applied: false, reason: "other_subscription" as const };
+    }
+    if (!grantsTier(deps, sub) && cur?.other_subs) {
+      const rest = { ...cur.other_subs };
+      delete rest[sub.id];
+      for (const id of Object.keys(rest)) {
+        const cand = await getSubscription(deps.cfg, id, deps.fetchImpl);
+        delete rest[id];
+        if (grantsTier(deps, cand)) {
+          if (!cand.metadata?.user_id) cand.metadata = { ...(cand.metadata ?? {}), user_id: fresh.id };
+          fresh.billing = { ...cur, other_subs: Object.keys(rest).length ? rest : undefined };
+          return { applied: true, tier: await applySubscription(fresh, cand, deps) };
+        }
+      }
+      fresh.billing = { ...cur, other_subs: undefined };
     }
     return { applied: true, tier: await applySubscription(fresh, sub, deps) };
   });
