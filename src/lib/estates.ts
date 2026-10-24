@@ -741,6 +741,7 @@ export async function suspendEstate(
     const attempts = (prior?.attempts ?? 0) + 1;
     const failed = attempts >= MAX_SUSPEND_RETRIES;
     const delay = Math.min(SUSPEND_BACKOFF_BASE_MS * 2 ** (attempts - 1), SUSPEND_BACKOFF_MAX_MS);
+    if (failed && !prior?.failed) console.error("ALERT suspend_failed", JSON.stringify({ key: "suspend_failed", user_id: e.user_id, app: e.app, attempts }));
     flag(
       failed,
       attempts,
@@ -840,6 +841,41 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
   }
 }
 
+/**
+ * Make a machine RUN with proxy autostart on, without trusting any single read (Fly reads can lag a
+ * write, so a "started / autostart on" reading may be a snapshot from before a stop): the idempotent
+ * autostart-on update (no launch) and the start are ALWAYS issued, then the result is verified by
+ * read-back (retried for stale reads, like the quiesce). Only a verified machine returns "running"; a
+ * machine Fly no longer has returns "gone"; anything else throws and the caller keeps its flag.
+ */
+export async function ensureMachineRunning(app: string, fly: FlyClient, machineId: string): Promise<"running" | "gone"> {
+  try {
+    const m = await fly.getMachine(app, machineId);
+    if (!m || m.state === "destroyed") return "gone";
+    if (!m.config) throw new EstateError(502, "machine_unreadable", "The estate machine could not be read.");
+    await fly.updateMachine(app, machineId, withAutostart(m.config, true), { skipLaunch: true });
+    let startError: unknown = null;
+    try {
+      await fly.startMachine(app, machineId);
+    } catch (err) {
+      startError = err; // the read-back below decides (a start of a running machine may be refused)
+    }
+    let why = "read-back: no reading";
+    for (let i = 0; i < readback.tries; i++) {
+      const v = await fly.getMachine(app, machineId);
+      if (!v || v.state === "destroyed") return "gone";
+      if (v.state !== "started") why = "read-back: machine is not started";
+      else if (!v.config || !(v.config.services ?? []).every((s: any) => s.autostart === true)) why = "read-back: proxy autostart is not on";
+      else return "running";
+      if (i < readback.tries - 1) await new Promise((r) => setTimeout(r, readback.delayMs));
+    }
+    throw startError ?? new Error(why);
+  } catch (err: any) {
+    if (err instanceof FlyError && err.status === 404) return "gone";
+    throw err;
+  }
+}
+
 /** Estate record for a machine Fly no longer has: visible in health, never re-created behind the operator's back. */
 function markMachineMissing(e: Estate, now: Date): void {
   logEstate(e, "resume", "the Fly machine behind this estate is gone; retry re-creates it on the existing volume (no second estate is provisioned)", now);
@@ -861,6 +897,7 @@ export async function recordResumeFailure(e: Estate, now: Date, err: unknown): P
   const failed = attempts >= MAX_RESUME_RETRIES;
   const delay = Math.min(SUSPEND_BACKOFF_BASE_MS * 2 ** (attempts - 1), SUSPEND_BACKOFF_MAX_MS);
   const next = failed ? (attempts < MAX_RESUME_RETRIES + MAX_SLOW_RETRIES ? new Date(now.getTime() + SLOW_RETRY_MS) : null) : new Date(now.getTime() + delay);
+  if (failed && !prior?.failed) console.error("ALERT resume_failed", JSON.stringify({ key: "resume_failed", user_id: e.user_id, app: e.app, attempts }));
   e.resume_pending = { since: prior?.since ?? now.toISOString(), attempts, last_error: "machine start failed", next_retry_at: next ? next.toISOString() : null, failed };
   e.health = {
     ok: false,
@@ -882,23 +919,12 @@ export async function recordResumeFailure(e: Estate, now: Date, err: unknown): P
 export async function reviveEstate(e: Estate, fly: FlyClient | null, now: Date = new Date()): Promise<Estate> {
   if (!e.suspend_pending) return e;
   if (fly && e.machine_id) {
-    const machineId = e.machine_id;
-    let m: Awaited<ReturnType<FlyClient["getMachine"]>> = null;
-    try {
-      m = await fly.getMachine(e.app, machineId);
-    } catch (err: any) {
-      if (!(err instanceof FlyError && err.status === 404)) throw err;
-    }
-    if (!m || m.state === "destroyed") {
+    const r = await ensureMachineRunning(e.app, fly, e.machine_id);
+    if (r === "gone") {
       markMachineMissing(e, now);
       await saveEstate(e, now, { owns: [...OWN_RESUME, "health", "machine_id", "error", "step"] });
       return e;
     }
-    if (!m.config) throw new EstateError(502, "machine_unreadable", "The estate machine could not be read.");
-    if ((m.config.services ?? []).some((s: any) => s.autostart !== true)) {
-      await fly.updateMachine(e.app, machineId, withAutostart(m.config, true), { skipLaunch: m.state !== "started" });
-    }
-    if (m.state !== "started") await fly.startMachine(e.app, machineId);
   }
   e.suspend_pending = null;
   e.resume_pending = null;
@@ -934,26 +960,17 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
   if (e.status !== "suspended") return e;
   if (fly && e.machine_id) {
     const machineId = e.machine_id;
-    let m: Awaited<ReturnType<FlyClient["getMachine"]>> = null;
+    let r: "running" | "gone";
     try {
-      m = await fly.getMachine(e.app, machineId);
-    } catch (err: any) {
-      if (!(err instanceof FlyError && err.status === 404)) throw err;
-    }
-    if (!m || m.state === "destroyed") {
-      markMachineMissing(e, now);
-      await saveEstate(e, now, { owns: [...OWN_RESUME, "health", "machine_id", "error", "step"] });
-      return e;
-    }
-    if (!m.config) throw new EstateError(502, "machine_unreadable", "The estate machine could not be read.");
-    if ((m.config.services ?? []).some((s: any) => s.autostart !== true)) {
-      await fly.updateMachine(e.app, machineId, withAutostart(m.config, true), { skipLaunch: m.state !== "started" });
-    }
-    try {
-      await fly.startMachine(e.app, machineId);
+      r = await ensureMachineRunning(e.app, fly, machineId);
     } catch (err) {
       await rollbackAutostart(e, fly, machineId, now);
       throw err;
+    }
+    if (r === "gone") {
+      markMachineMissing(e, now);
+      await saveEstate(e, now, { owns: [...OWN_RESUME, "health", "machine_id", "error", "step"] });
+      return e;
     }
     logEstate(e, "resume", `machine ${machineId} started`, now);
   } else {

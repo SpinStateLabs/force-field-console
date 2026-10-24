@@ -12,6 +12,15 @@ export type ModelMachine = { id: string; name: string; state: string; config: an
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** A realistic Fly failure: app name, machine id, URL, a bearer-looking token and an HTTP status in the text. */
+export const flyErr = (status: number, op: string, id: string) =>
+  new FlyError(
+    status,
+    `Fly POST /apps/ff-est-0123abcd/machines/${id}/${op} answered HTTP ${status}: {"error":"could not reach https://api.machines.dev/v1/apps/ff-est-0123abcd (Bearer fo1_LEAKME0123456789abcdef rejected)"}`,
+  );
+/** What must never reach users (publicEstate, /api/health, stored user-visible text). */
+export const FLY_LEAK_RE = /fo1_|Bearer|api\.machines\.dev|\/apps\/|ff-est-0123abcd\/|answered|HTTP \d{3}|LEAKME/;
+
 export const RICH_CONFIG = () => ({
   image: "registry.fly.io/x:y",
   env: { FIELD_DATA_DIR: "/data", FORCE_GATEWAY_ENFORCE: "1" },
@@ -52,6 +61,7 @@ export class ModelFly {
   updateDelayOnce = 0; // only the NEXT update is slow (a stale writer's config landing late)
   waitDelay = 0;
   staleReads = 0; // the next N reads return the snapshot taken before the latest update
+  staleAfterUpdate = 0; // after EVERY update the next N reads are stale
   private snapshot: ModelMachine | null = null;
 
   machine(id: string, over: Partial<ModelMachine> & { autostart?: boolean } = {}): ModelMachine {
@@ -65,7 +75,7 @@ export class ModelFly {
 
   async getMachine(_app: string, id: string): Promise<any> {
     this.log.push("get " + id);
-    if (this.failGet) throw new FlyError(500, "get failed");
+    if (this.failGet) throw flyErr(500, "", id);
     if (this.getReturnsNull) return null;
     if (this.staleReads > 0 && this.snapshot && this.snapshot.id === id) {
       this.staleReads -= 1;
@@ -77,13 +87,14 @@ export class ModelFly {
   async updateMachine(_app: string, id: string, config: any, opts: { skipLaunch?: boolean } = {}): Promise<any> {
     this.log.push(`update ${id} autostart=${config.services?.[0]?.autostart} skip=${Boolean(opts.skipLaunch)}`);
     if (this.updateThrows404) throw new FlyError(404, "gone");
-    if (this.failUpdate || (this.failUpdateAfter !== null && this.updatesDone >= this.failUpdateAfter)) throw new FlyError(500, "update failed");
+    if (this.failUpdate || (this.failUpdateAfter !== null && this.updatesDone >= this.failUpdateAfter)) throw flyErr(500, "", id);
     const m = this.machine(id);
     this.snapshot = structuredClone(m);
     const d = this.updateDelayOnce || this.updateDelay;
     this.updateDelayOnce = 0;
     await sleep(d);
     this.updatesDone += 1;
+    if (this.staleAfterUpdate) this.staleReads = this.staleAfterUpdate;
     if (!this.ignoreUpdate) m.config = structuredClone(config);
     if (!opts.skipLaunch) {
       if (m.state === "started") this.restarts += 1;
@@ -96,14 +107,14 @@ export class ModelFly {
     this.log.push("stop " + id);
     await sleep(this.stopDelay);
     if (this.failStopWith) throw this.failStopWith;
-    if (this.failStop) throw new FlyError(503, "stop failed");
+    if (this.failStop) throw flyErr(503, "stop", id);
     if (!this.stopNoop) this.machine(id).state = "stopped";
   }
 
   async startMachine(_app: string, id: string): Promise<void> {
     this.log.push("start " + id);
     await sleep(this.startDelay);
-    if (this.failStart) throw new FlyError(503, "start failed");
+    if (this.failStart) throw flyErr(503, "start", id);
     this.machine(id).state = "started";
   }
 

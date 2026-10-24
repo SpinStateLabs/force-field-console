@@ -1,0 +1,31 @@
+import { it, expect, beforeEach, afterEach } from "vitest";
+import { ModelFly } from "./model-fly";
+import { freshStore } from "./helpers";
+import { createUser, saveUser, type User } from "../src/lib/users";
+import { stripeConfig } from "../src/lib/stripe";
+import { handleStripeEvent } from "../src/lib/billing";
+import { getEstate, queueEstate, readback, saveEstate } from "../src/lib/estates";
+const ENV = { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_OPERATOR: "price_op", STRIPE_PRICE_SOVEREIGN: "price_sov", FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:new", ESTATE_SECRET_MASTER: "master-0123456789" };
+let user: User; let fly: ModelFly; const orig = readback.delayMs;
+const sub = (id: string, status: string) => ({ id, status, customer: "cus_1", items: { data: [{ price: { id: "price_op" }, current_period_end: 1_800_000_000 }] }, metadata: { user_id: user.id } });
+const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, data: { object: s } });
+const st: Record<string, string> = {};
+const fetchImpl = (async (u: any) => { const id = String(u).split("/").pop()!; return new Response(JSON.stringify(sub(id, st[id] ?? "canceled")), { status: 200 }); }) as any;
+beforeEach(async () => { freshStore(); Object.assign(process.env, ENV); readback.delayMs = 2; user = await createUser("st@example.com", "sufficiently-long-pass"); fly = new ModelFly(); });
+afterEach(() => { readback.delayMs = orig; for (const k of Object.keys(ENV)) delete process.env[k]; });
+it("stale read in revive: cancel's stop wait times out (flag pending, machine really stopped), re-grant reads a pre-stop snapshot", async () => {
+  user.tier = "operator"; user.billing = { customer_id: "cus_1", subscription_id: "sub_A", status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" }; await saveUser(user);
+  const e = await queueEstate(user); Object.assign(e, { status: "ready", step: "done", machine_id: "m_1", volume_id: "vol_1", url: "https://x.fly.dev" }); await saveEstate(e);
+  fly.machine("m_1"); fly.waitNever = true; st.sub_A = "canceled"; st.sub_B = "active";
+  const d = () => ({ cfg: stripeConfig()!, fly: fly as any, fetchImpl });
+  await handleStripeEvent(ev("a_del", "customer.subscription.deleted", 200, sub("sub_A", "canceled")), d());
+  expect((await getEstate(user.id))!.suspend_pending).toBeTruthy();
+  expect(fly.machine("m_1").state).toBe("stopped");
+  fly.waitNever = false;
+  // Fly's read-after-write lag: the next reads return the snapshot taken before the latest update (started, autostart on)
+  fly.staleReads = 1;
+  await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), d());
+  const after = (await getEstate(user.id))!;
+  expect({ estate: after.status, pending: after.suspend_pending ?? null, machine: fly.machine("m_1").state, autostartOff: fly.autostartOff("m_1") }).toEqual({ estate: "ready", pending: null, machine: "started", autostartOff: false });
+  expect(fly.ping("m_1")).toBe("started");
+});

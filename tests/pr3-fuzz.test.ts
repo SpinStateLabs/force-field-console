@@ -30,6 +30,7 @@ beforeEach(async () => {
   readback.delayMs = 2;
   user = await createUser("fz@example.com", "sufficiently-long-pass");
   fly = new ModelFly();
+  fly.staleAfterUpdate = 1; // Fly reads lag a write by one read, in every case
   for (const k of Object.keys(statuses)) delete statuses[k];
 });
 afterEach(() => {

@@ -356,7 +356,7 @@ describe("dedicated estates", () => {
     expect(back.status).toBe("ready");
     expect(back.suspended_at).toBeNull();
     // autostart is restored before the machine is started
-    expect(fly.calls.slice(5).map((c) => c.m)).toEqual(["getMachine", "updateMachine", "startMachine"]);
+    expect(fly.calls.slice(5).map((c) => c.m)).toEqual(["getMachine", "updateMachine", "startMachine", "getMachine"]); // ... then the read-back
     expect(fly.machines[e.app][0].config.services[0].autostart).toBe(true);
   });
 

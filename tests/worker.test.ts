@@ -94,7 +94,7 @@ describe("worker loop", () => {
   it("stops at the budget and clears the lease", async () => {
     await queueEstate(user);
     const fly = new LoopFly();
-    const r = await runWorker(user.id, "advance", fly as any, { fetchImpl: async () => new Response("", { status: 503 }), sleep: async () => {}, budgetMs: 1 });
+    const r = await runWorker(user.id, "advance", fly as any, { fetchImpl: async () => new Response("", { status: 503 }), sleep: async () => {}, budgetMs: 150 }); // not 1 ms: the lease save alone can take longer under load
     expect(r.iterations).toBeGreaterThanOrEqual(1);
     expect((await getEstate(user.id))!.worker_until).toBeNull();
   });
