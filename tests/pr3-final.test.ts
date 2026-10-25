@@ -171,6 +171,7 @@ describe("ensureMachineRunning, deterministically", () => {
     await estate();
     stopQuietly();
     fly.failStartWith = new FlyError(404, "gone");
+    fly.listMachines = async () => []; // gone: the app's machine list no longer carries it either (CX4)
     expect(await ensureMachineRunning("a", fly as any, "m_1")).toBe("gone");
   });
 

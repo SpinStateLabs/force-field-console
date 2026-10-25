@@ -120,6 +120,7 @@ describe("a suspended machine stays stopped when the proxy gets a request", () =
     await saveEstate(e);
     const b = new ModelFly();
     b.updateThrows404 = true;
+    b.listMachines = async () => []; // gone: the app's machine list no longer carries it either (CX4)
     const r = await suspendEstate((await getEstate(other.id))!, b as any, new Date(), "x");
     expect(r.status).toBe("suspended");
   });
