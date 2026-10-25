@@ -328,7 +328,7 @@ export class Net {
           }
           this.setMachine(mm, { state, config: cfg });
           this.log(`UPDATE ${mm.id} autostart=${Net.autostartOff(cfg) ? "off" : "ON"} skip=${skip} -> ${mm.state}`);
-          this.applied("update", app, mm, issuer, cfg);
+          this.applied("update", app, mm, issuer, body.config); // the REQUESTED config (updateIgnored applies nothing)
           return this.json({ id: mm.id, state: mm.state, config: structuredClone(mm.config) });
         }, "machine_update");
       }
