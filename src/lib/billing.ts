@@ -39,6 +39,17 @@ export async function alreadyProcessed(eventId: string): Promise<boolean> {
 }
 
 /**
+ * True only when the event was handled to completion (status "done"). A claim still
+ * "processing" is NOT done: its delivery may have been killed, so a redelivery must not be
+ * acknowledged as a duplicate (Stripe stops retrying on any 2xx and the event would be lost).
+ */
+export async function eventDone(eventId: string): Promise<boolean> {
+  const store = await portalStore();
+  const rec = (await store.get("stripe_events/" + eventId, { type: "json" })) as { status?: string } | null;
+  return rec?.status === "done";
+}
+
+/**
  * Claim a Stripe event id BEFORE handling it, with a create-only write: false
  * when another delivery of the same event already claimed or processed it, so
  * two concurrent deliveries can never both apply. A claim that fails to handle
