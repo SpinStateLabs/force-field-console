@@ -168,6 +168,12 @@ export async function getSubscription(cfg: StripeConfig, id: string, fetchImpl: 
   return (await stripeRequest(cfg, "GET", `/v1/subscriptions/${encodeURIComponent(id)}`, undefined, fetchImpl)) as StripeSubscription;
 }
 
+/** All of a customer's subscriptions (any status, first 100: one customer never has more here). */
+export async function listCustomerSubscriptions(cfg: StripeConfig, customer: string, fetchImpl: FetchLike = fetch): Promise<StripeSubscription[]> {
+  const r = await stripeRequest(cfg, "GET", "/v1/subscriptions", { customer, status: "all", limit: 100 }, fetchImpl);
+  return Array.isArray(r?.data) ? (r.data as StripeSubscription[]) : [];
+}
+
 export function subscriptionPriceId(sub: StripeSubscription): string | null {
   return sub.items?.data?.[0]?.price?.id ?? null;
 }

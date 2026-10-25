@@ -14,6 +14,7 @@ import { getUserById, saveUser, type User, type Tier } from "./users";
 import {
   GRANTING_STATUSES,
   getSubscription,
+  listCustomerSubscriptions,
   subscriptionPeriodEnd,
   subscriptionPriceId,
   tierForPrice,
@@ -143,8 +144,17 @@ export async function releaseCheckout(userId: string, token: string): Promise<vo
   if (read?.data?.token === token) await store.delete(key); // only our own claim
 }
 
-/** Resolve the portal user for a subscription: metadata.user_id first, then the customer pointer. */
-export async function userForSubscription(sub: StripeSubscription): Promise<User | null> {
+/**
+ * Resolve the portal user for a subscription: metadata.user_id first, then the customer pointer.
+ * The pointer exists only after a first APPLIED event of the customer, and Stripe does not order
+ * deliveries: a subscription WITHOUT metadata (created outside Checkout) whose event arrives before
+ * any of the customer's other events was applied would otherwise be dropped for good (200, no retry).
+ * With `deps`, that case asks Stripe live for the customer's subscriptions and takes the user named
+ * by their metadata.user_id: same customer by construction, and exactly one existing portal user
+ * (two different users named on one customer is ambiguous and resolves to nobody). A Stripe failure
+ * throws, so the webhook answers 5xx and Stripe redelivers the event.
+ */
+export async function userForSubscription(sub: StripeSubscription, deps?: Pick<WebhookDeps, "cfg" | "fetchImpl">): Promise<User | null> {
   const metaUser = sub.metadata?.user_id;
   if (metaUser) {
     const u = await getUserById(metaUser);
@@ -152,7 +162,18 @@ export async function userForSubscription(sub: StripeSubscription): Promise<User
   }
   const store = await portalStore();
   const ptr = (await store.get("stripe_customers/" + sub.customer, { type: "json" })) as { user_id: string } | null;
-  return ptr?.user_id ? await getUserById(ptr.user_id) : null;
+  if (ptr?.user_id) return await getUserById(ptr.user_id);
+  if (metaUser || !deps) return null;
+  const siblings = await listCustomerSubscriptions(deps.cfg, String(sub.customer), deps.fetchImpl);
+  const named = new Set<string>();
+  for (const s of siblings) {
+    if (String(s.customer) === String(sub.customer) && s.metadata?.user_id) named.add(s.metadata.user_id);
+  }
+  if (named.size !== 1) {
+    if (named.size > 1) console.warn("billing: customer", sub.customer, "names more than one portal user; subscription", sub.id, "not resolved");
+    return null;
+  }
+  return await getUserById([...named][0]);
 }
 
 /**
@@ -347,7 +368,7 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
   if (type === "customer.subscription.created" || type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
     const sub = obj as StripeSubscription;
     if (!sub?.id || !sub?.customer) return { handled: false, note: "subscription event without id/customer" };
-    const user = await userForSubscription(sub);
+    const user = await userForSubscription(sub, deps);
     if (!user) return { handled: false, note: "no portal user for the subscription" };
     const r = await applyOrdered(user, sub, event, deps);
     if (!r.applied) return { handled: false, note: r.reason === "other_subscription" ? `${type} for ${sub.id} ignored (not the user's current subscription)` : `stale ${type} for ${sub.id} ignored (out of order)` };
