@@ -65,6 +65,10 @@ export class Net {
   machineSeq = 0;
   /** Requests to an origin while its machine was stopped (wakes counted on the machine). */
   originHits = 0;
+  /** Monitor hook: called when a mutating Fly call is APPLIED (possibly after its caller gave up). */
+  onApply: ((op: string, app: string, m: FMachine | null, info: { issuedAt: number; callerGone: boolean; cfg?: any }) => void) | null = null;
+  private issuing: { inv: any; at: number } | null = null;
+  calls = 0;
 
   private lat(): number {
     const [a, b] = this.baseLatency;
@@ -117,6 +121,7 @@ export class Net {
       m.wakes += 1;
       this.setMachine(m, { state: "started" });
       this.log(`PROXY WAKE ${m.id}`);
+      this.onApply?.("proxy_wake", app, m, { issuedAt: clock.now, callerGone: false });
     }
     return m.state;
   }
@@ -137,10 +142,14 @@ export class Net {
     const signal: AbortSignal | undefined = init?.signal;
     const method = (init?.method ?? "GET").toUpperCase();
     let plan: { latency: number; run: () => Response | Promise<Response> };
+    this.calls += 1;
+    this.issuing = { inv, at: clock.now };
     try {
       plan = this.route(url, method, init);
     } catch (e) {
       return Promise.reject(e);
+    } finally {
+      this.issuing = null;
     }
     return new Promise<Response>((resolve, reject) => {
       let settled = false;
@@ -173,6 +182,12 @@ export class Net {
       });
     });
   };
+
+  private applied(op: string, app: string, m: FMachine | null, issuer: { inv: any; at: number } | null, cfg?: any) {
+    if (!this.onApply) return;
+    const inv = issuer?.inv;
+    this.onApply(op, app, m, { issuedAt: issuer?.at ?? clock.now, callerGone: Boolean(inv && (inv.dead || inv.done)), cfg });
+  }
 
   private json(b: unknown, status = 200): Response {
     return new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
@@ -255,10 +270,12 @@ export class Net {
     if (p) {
       const app = decodeURIComponent(p[1]);
       if (method === "GET") return this.flyCall("list_volumes", () => (this.apps.has(app) ? this.json(this.app(app).volumes) : this.json({ error: "app not found" }, 404)), "read");
+      const issuer = this.issuing;
       return this.flyCall("create_volume", () => {
         const a = this.app(app);
         const v = { id: `vol_${app}_${a.volumes.length + 1}`, name: body.name };
         a.volumes.push(v);
+        this.applied("create_volume", app, null, issuer);
         return this.json(v);
       }, "update");
     }
@@ -266,9 +283,11 @@ export class Net {
     if (p) {
       const app = decodeURIComponent(p[1]);
       if (method === "GET") return this.flyCall("list_machines", () => (this.apps.has(app) ? this.json([...this.app(app).machines.values()].filter((x) => x.state !== "destroyed").map((x) => ({ id: x.id, name: x.name, state: x.state, config: structuredClone(x.config) }))) : this.json({ error: "app not found" }, 404)), "read");
+      const issuer = this.issuing;
       return this.flyCall("create_machine", () => {
         const mm = this.addMachine(app, body.config, "started");
         this.log(`CREATE ${mm.id} in ${app}`);
+        this.applied("create_machine", app, mm, issuer, body.config);
         return this.json({ id: mm.id, name: mm.name, state: mm.state, config: mm.config });
       }, "update");
     }
@@ -297,6 +316,7 @@ export class Net {
       }
       if (!sub && method === "POST") {
         const skip = Boolean(body?.skip_launch);
+        const issuer = this.issuing;
         return this.flyCall("update", () => {
           const mm = get();
           if (!mm) return this.json({ error: "not found" }, 404);
@@ -308,6 +328,7 @@ export class Net {
           }
           this.setMachine(mm, { state, config: cfg });
           this.log(`UPDATE ${mm.id} autostart=${Net.autostartOff(cfg) ? "off" : "ON"} skip=${skip} -> ${mm.state}`);
+          this.applied("update", app, mm, issuer, cfg);
           return this.json({ id: mm.id, state: mm.state, config: structuredClone(mm.config) });
         }, "machine_update");
       }
@@ -321,6 +342,7 @@ export class Net {
         }, "update");
       }
       if (sub === "/start") {
+        const issuer = this.issuing;
         return this.flyCall("start", () => {
           const mm = get();
           if (!mm) return this.json({ error: "not found" }, 404);
@@ -328,6 +350,7 @@ export class Net {
           mm.starts += 1;
           this.setMachine(mm, { state: "started" });
           this.log(`START ${mm.id}`);
+          this.applied("start", app, mm, issuer);
           return this.json({ ok: true });
         }, "update");
       }
