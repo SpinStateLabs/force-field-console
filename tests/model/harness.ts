@@ -292,7 +292,9 @@ export class World {
       async () => {
         const res = await billingHandler(new Request("https://portal.test/api/billing/webhook", { method: "POST", body: raw, headers: { "stripe-signature": sig } }), {} as any);
         const body = await res.json().catch(() => ({}));
-        return { status: res.status, body };
+        // the claim as it stood when this answer was given (a 200 duplicate for a claim still "processing")
+        const claim = (this.store.inner as any).map.get("stripe_events/" + ev.id) ?? null;
+        return { status: res.status, body, claimAtReply: claim?.status ?? null };
       },
       { limitMs, killAtOp: crashAt },
     );
@@ -312,10 +314,9 @@ export class World {
       const ok = r && r.status >= 200 && r.status < 300;
       this.log(`  -> ${ev.id} ${inv.dead ? "KILLED " + inv.killedBy : inv.error ? "THREW " + String(inv.error?.message ?? inv.error).slice(0, 80) : r.status + " " + JSON.stringify(r.body).slice(0, 140)}`);
       if (ok) {
-        if (!ev.delivered && r.body?.duplicate) {
-          // Stripe counts this 2xx as delivered; the event was never applied unless another delivery applies it
-          const claim = (this.store.inner as any).map.get("stripe_events/" + ev.id);
-          if (claim?.status === "processing") ev.lostAsDuplicate = true;
+        if (!ev.delivered && r.body?.duplicate && r.claimAtReply === "processing") {
+          // Stripe counts this 2xx as delivered; the event is applied only if the in-flight attempt succeeds
+          ev.lostAsDuplicate = true;
         }
         if (!r.body?.duplicate) ev.lostAsDuplicate = false;
         ev.delivered = true;
