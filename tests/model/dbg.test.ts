@@ -1,9 +1,14 @@
 import { it, vi } from "vitest";
 import { runCase } from "./harness";
-it("dbg", async () => {
+it("dbg late update", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
-  const t = performance.now();
-  const r = await runCase({ seed: 1, users: ["ready"], stripeRetryMs: 60000, actions: [{ k: "tick", gap: 120000, crashAt: null }] }, { trace: true });
-  process.stdout.write(`ms=${performance.now() - t} rounds=${r.rounds} v=${JSON.stringify(r.violations)} fly=${r.flyCalls} store=${r.storeOps}\n`);
-  process.stdout.write(r.trace.slice(0, 60).join("\n") + "\n");
+  const r = await runCase({ seed: 3, users: ["ready"], stripeRetryMs: 60000, actions: [
+    { k: "fault", f: { pSlowUpdate: 1, slowUpdateMs: 25000 }, stripeTimeout: 0 },
+    { k: "key", u: 0, gap: 21000 },
+    { k: "fault", f: {}, stripeTimeout: 0 },
+    { k: "stripe", op: { k: "status", u: 0, sub: 1, status: "canceled" }, gap: 0 },
+    { k: "deliver", ev: 0, gap: 60000, limitMs: 60000, crashAt: null },
+  ] }, { trace: true });
+  process.stdout.write(`rounds=${r.rounds}\n${JSON.stringify(r.violations, null, 1)}\n`);
+  process.stdout.write(r.trace.slice(0, 80).join("\n") + "\n");
 }, 120000);
