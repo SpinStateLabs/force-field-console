@@ -8,7 +8,7 @@
 // production deploy (never in previews). Logs counts only.
 import type { Config } from "@netlify/functions";
 import { flyClientOrNull, flyConfig } from "../../src/lib/fly";
-import { advanceEstate, checkEstateHealth, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
+import { advanceEstate, checkEstateHealth, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
 import { userLockAgeMs } from "../../src/lib/locks";
 import { getUserById } from "../../src/lib/users";
 import { isGrantingUser, retryPendingSuspend } from "../../src/lib/billing";
@@ -57,6 +57,17 @@ export default async (_req: Request): Promise<Response> => {
     );
   }
 
+  // A SUSPENDED estate (no flags) that had a machine-config write recently is not trusted: a write whose Fly
+  // update outlived its caller can be applied after the suspension (autostart on, machine launched). Those
+  // estates are re-verified under the lock below until the write has settled (configWriteMarks).
+  let reverify = new Set<string>();
+  try {
+    const marks = await configWriteMarks();
+    reverify = new Set(estates.filter((e) => e.status === "suspended" && e.machine_id && !e.suspend_pending && !e.resume_pending && marks.has(e.user_id)).map((e) => e.user_id));
+  } catch (err: any) {
+    console.error("estate-tick: could not list the config-write marks:", String(err?.message ?? err).slice(0, 200));
+  }
+
   // Reconcile suspended estates and pending suspensions against the user's billing, first: a machine may
   // still be billing (suspend not completed) or a paying customer may have a dead estate (resume not
   // completed). A paying user's estate is resumed/revived, otherwise the stop is retried; both with
@@ -73,12 +84,14 @@ export default async (_req: Request): Promise<Response> => {
     } else if (e.suspend_pending || e.resume_pending) {
       if (e.suspend_pending?.failed) failedSuspends += 1;
       if (retryDue(e.suspend_pending, now)) work.push(e);
+    } else if (reverify.has(e.user_id)) {
+      work.push(e);
     }
   }
   for (const e of work) {
     if (Date.now() - started > BUDGET_MS) break;
     try {
-      const r = await retryPendingSuspend(e.user_id, fly, now);
+      const r = await retryPendingSuspend(e.user_id, fly, now, { reverify: reverify.has(e.user_id) });
       bump(
         r.outcome === "suspended" ? "suspend_retry_ok"
         : r.outcome === "resumed" ? "resume_retry_ok"

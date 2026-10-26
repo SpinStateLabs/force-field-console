@@ -728,8 +728,10 @@ export async function suspendEstate(
     } catch (err: any) {
       if (!(err instanceof FlyError && err.status === 404)) throw err;
     }
-    if (!seen || seen.state === "destroyed" || seen.state === "stopped") return e;
-    logEstate(e, "suspend", "the record says suspended but the machine is running; quieting it down", now);
+    // A stopped machine with any service's autostart ON is not quiet either: the proxy wakes it on the next
+    // request (a config write whose Fly update landed after the suspension leaves exactly that behind).
+    if (!machineAwake(seen)) return e;
+    logEstate(e, "suspend", seen!.state === "stopped" ? "the record says suspended but proxy autostart is on; quieting the machine down" : "the record says suspended but the machine is running; quieting it down", now);
   }
   const onlyIf = opts.requirePending ? (cur: Estate) => Boolean(cur.suspend_pending) : undefined;
   const flag = (failed: boolean, attempts: number, note: string, next: Date | null, prior: SuspendPending | null | undefined) => {
@@ -821,6 +823,17 @@ export async function suspendEstate(
   if (e.health && /^(suspend|resume) (pending|failed)/.test(e.health.note)) e.health = null;
   await saveEstate(e, now, { owns: discovered ? [...OWN_SUSPEND, "machine_id"] : OWN_SUSPEND, onlyIf });
   return e;
+}
+
+/**
+ * Can this machine bill behind a suspended record? Running (anything but stopped / destroyed), or stopped
+ * with any service's proxy autostart on (the next inbound request starts it). A stopped machine whose
+ * config cannot be read counts as quiet (nothing to compare); null / destroyed is gone.
+ */
+export function machineAwake(m: { state?: string; config?: MachineConfig | null } | null | undefined): boolean {
+  if (!m || m.state === "destroyed") return false;
+  if (m.state !== "stopped") return true;
+  return Boolean(m.config) && (m.config!.services ?? []).some((s: any) => s.autostart !== false);
 }
 
 /** A pending suspension is moot (the subscription is active again): drop it; the machine was never stopped. */
@@ -1079,9 +1092,42 @@ export async function updateMachineGuarded(
       current = (await fly.getMachine(e.app, id))?.config ?? null;
       if (!current) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
     }
-    await fly.updateMachine(e.app, id, build(current));
+    const config = build(current);
+    // Persisted BEFORE the slow call: if it times out or this function is killed, Fly may still apply the
+    // update after the lock is gone, even after a suspension (CX2); the mark makes the tick re-verify.
+    await (await portalStore()).setJSON(configWriteKey(e.user_id), { at: new Date().toISOString() });
+    await fly.updateMachine(e.app, id, config);
   };
   return withUserLock(e.user_id, run);
+}
+
+/**
+ * Machine-config writes that may still be applied by Fly (one record per user: the start of the latest
+ * guarded write). A guarded write's caller can give up (client timeout, function limit) while Fly still
+ * applies the update later, autostart on, possibly after a cancellation suspended the estate. The tick
+ * re-verifies a suspended estate carrying a mark (retryPendingSuspend reverify) and drops the mark once
+ * the machine was found quiet and the write is older than CONFIG_WRITE_SETTLE_MS. The window is an
+ * assumption (INFERRED: a ~20 s update was seen live; how late Fly can apply an abandoned call is not known).
+ */
+const CONFIG_WRITE_PREFIX = "ops/config_write/";
+export const CONFIG_WRITE_SETTLE_MS = 30 * 60_000;
+function configWriteKey(userId: string): string {
+  return CONFIG_WRITE_PREFIX + userId;
+}
+
+/** The users with a guarded config write that may still be in flight at Fly (one list call, no reads). */
+export async function configWriteMarks(): Promise<Set<string>> {
+  const { blobs } = await (await portalStore()).list({ prefix: CONFIG_WRITE_PREFIX });
+  return new Set(blobs.map((b) => b.key.slice(CONFIG_WRITE_PREFIX.length)));
+}
+
+/** Drop the mark once the write has settled; call under the user lock, after the machine was found quiet. */
+export async function settleConfigWrite(userId: string, now: Date): Promise<void> {
+  const store = await portalStore();
+  const v = (await store.get(configWriteKey(userId), { type: "json" })) as { at?: string } | null;
+  if (!v) return;
+  const at = v.at ? Date.parse(v.at) || 0 : 0;
+  if (now.getTime() - at >= CONFIG_WRITE_SETTLE_MS) await store.delete(configWriteKey(userId));
 }
 
 /** Place the customer's Anthropic key as an estate secret (never stored in the portal); the machine restarts. */
