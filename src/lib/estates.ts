@@ -698,8 +698,8 @@ export function retryDue(p: { next_retry_at: string | null; failed: boolean } | 
 /**
  * Stop the machine; keep the volume (no data is destroyed here). A failed stop leaves the
  * estate un-suspended with `suspend_pending` (retried by the tick with backoff, at most
- * MAX_SUSPEND_RETRIES times, then `failed`). A Fly 404 means the machine is already gone:
- * that counts as stopped. Error detail goes to the server log only; the record, health and
+ * MAX_SUSPEND_RETRIES times, then `failed`). A Fly 404 means the machine is already gone
+ * (once the app's machine list agrees, see confirmMachineGone): that counts as stopped. Error detail goes to the server log only; the record, health and
  * log carry fixed generic text.
  *
  * A cancel that lands while the create_machine step may be in flight (no machine_id yet)
@@ -718,20 +718,31 @@ export async function suspendEstate(
   opts: { requirePending?: boolean } = {},
 ): Promise<Estate> {
   // A suspended estate with a pending flag is one whose machine still needs quieting (a failed resume rollback).
+  // The inline time budget of this call: the re-verify below and the quiesce that may follow share it.
+  let deadline: number | undefined;
   if (e.status === "suspended" && !e.suspend_pending) {
     // The record says suspended: verify it against the machine instead of trusting it (a resume whose start
     // landed but whose wait / read-back failed leaves a RUNNING machine behind a suspended record).
     if (!fly || !e.machine_id) return e;
+    deadline = Date.now() + quiesceBudget.ms;
     let seen: Awaited<ReturnType<FlyClient["getMachine"]>> = null;
     try {
       seen = await fly.getMachine(e.app, e.machine_id);
     } catch (err: any) {
       if (!(err instanceof FlyError && err.status === 404)) throw err;
     }
-    // A stopped machine with any service's autostart ON is not quiet either: the proxy wakes it on the next
-    // request (a config write whose Fly update landed after the suspension leaves exactly that behind).
-    if (!machineAwake(seen)) return e;
-    logEstate(e, "suspend", seen!.state === "stopped" ? "the record says suspended but proxy autostart is on; quieting the machine down" : "the record says suspended but the machine is running; quieting it down", now);
+    if (!seen || seen.state === "destroyed") {
+      // A "not found" is trusted only once the app's machine list agrees (confirmMachineGone); a machine
+      // that is still listed (or a list that cannot be read) is quieted below instead. Past the budget the
+      // list call is not made: the quiesce below makes no Fly call either, so the suspension goes pending.
+      const gone = Date.now() <= deadline && (await confirmMachineGone(e.app, fly, e.machine_id).then(() => true, () => false));
+      if (gone) return e;
+    } else if (!machineAwake(seen)) {
+      // A stopped machine with any service's autostart ON is not quiet either: the proxy wakes it on the next
+      // request (a config write whose Fly update landed after the suspension leaves exactly that behind).
+      return e;
+    }
+    logEstate(e, "suspend", seen?.state === "stopped" ? "the record says suspended but proxy autostart is on; quieting the machine down" : "the record says suspended but the machine is running; quieting it down", now);
   }
   const onlyIf = opts.requirePending ? (cur: Estate) => Boolean(cur.suspend_pending) : undefined;
   const flag = (failed: boolean, attempts: number, note: string, next: Date | null, prior: SuspendPending | null | undefined) => {
@@ -797,7 +808,7 @@ export async function suspendEstate(
   }
   if (fly && machineId) {
     try {
-      const r = await quiesceMachine(e.app, fly, machineId, Date.now() + quiesceBudget.ms);
+      const r = await quiesceMachine(e.app, fly, machineId, deadline ?? Date.now() + quiesceBudget.ms);
       logEstate(
         e,
         "suspend",
@@ -866,15 +877,43 @@ export const readback = { tries: 4, delayMs: 400 };
 /** Time budget of one inline quiesce (the webhook's cancel path); the tick's retries get the same. */
 export const quiesceBudget = { ms: 20_000 };
 
+/**
+ * A single "not found" for one machine is not proof that it is gone (that Fly never answers 404 for a live
+ * machine is an unverified assumption, A10). Before "gone" is acted on (an estate marked suspended without
+ * a stop, or a paying estate marked machine_missing with its machine_id dropped), the app's machine list,
+ * a different Fly endpoint, must not carry the machine either. A machine still listed throws, so the
+ * caller keeps its pending flag and the tick retries. An app that is itself not found counts as gone.
+ */
+export async function confirmMachineGone(app: string, fly: FlyClient, machineId: string): Promise<"gone"> {
+  let listed: Awaited<ReturnType<FlyClient["listMachines"]>>;
+  try {
+    listed = await fly.listMachines(app);
+  } catch (err: any) {
+    if (err instanceof FlyError && err.status === 404) return "gone";
+    throw err;
+  }
+  if (listed.some((m: any) => m?.id === machineId && m?.state !== "destroyed")) {
+    throw new Error("machine answered not found but is still listed on Fly");
+  }
+  return "gone";
+}
+
 export async function quiesceMachine(app: string, fly: FlyClient, machineId: string, deadline?: number): Promise<"stopped" | "gone"> {
   // The webhook's cancel path runs this inline, so it has a time budget (the suspension is already persisted
   // as pending before the first Fly call; running out of budget leaves a retryable pending state for the tick).
   const over = () => {
     if (deadline !== undefined && Date.now() > deadline) throw new Error("quiesce time budget exceeded");
   };
+  // The confirming list call is a Fly call too (up to its own timeout), so the budget is checked before it:
+  // past the deadline a "not found" is left to the tick (pending + retry) instead of confirmed inline.
+  const confirmGone = () => {
+    over();
+    return confirmMachineGone(app, fly, machineId);
+  };
   try {
+    over(); // a budget already spent by the caller (the suspended-record re-verify) starts no Fly call
     const m = await fly.getMachine(app, machineId);
-    if (!m || m.state === "destroyed") return "gone";
+    if (!m || m.state === "destroyed") return await confirmGone();
     if (!m.config) throw new Error("machine config unreadable");
     over();
     if ((m.config.services ?? []).some((s: any) => s.autostart !== false)) {
@@ -889,7 +928,7 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
     for (let i = 0; i < readback.tries; i++) {
       over();
       const v = await fly.getMachine(app, machineId);
-      if (!v || v.state === "destroyed") return "gone";
+      if (!v || v.state === "destroyed") return await confirmGone();
       if (v.state !== "stopped") {
         why = "read-back: machine is not stopped";
         agree = 0;
@@ -903,7 +942,7 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
     }
     throw new Error(why);
   } catch (err: any) {
-    if (err instanceof FlyError && err.status === 404) return "gone";
+    if (err instanceof FlyError && err.status === 404) return confirmGone();
     throw err;
   }
 }
@@ -921,7 +960,7 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
 export async function ensureMachineRunning(app: string, fly: FlyClient, machineId: string): Promise<"running" | "gone"> {
   try {
     const m = await fly.getMachine(app, machineId);
-    if (!m || m.state === "destroyed") return "gone";
+    if (!m || m.state === "destroyed") return await confirmMachineGone(app, fly, machineId);
     let startError: unknown = null;
     try {
       await fly.startMachine(app, machineId);
@@ -933,7 +972,7 @@ export async function ensureMachineRunning(app: string, fly: FlyClient, machineI
     let agree = 0;
     for (let i = 0; i < readback.tries; i++) {
       const v = await fly.getMachine(app, machineId);
-      if (!v || v.state === "destroyed") return "gone";
+      if (!v || v.state === "destroyed") return await confirmMachineGone(app, fly, machineId);
       if (v.state !== "started") {
         why = "read-back: machine is not started";
         agree = 0;
@@ -944,7 +983,7 @@ export async function ensureMachineRunning(app: string, fly: FlyClient, machineI
     }
     throw startError ?? new Error(why);
   } catch (err: any) {
-    if (err instanceof FlyError && err.status === 404) return "gone";
+    if (err instanceof FlyError && err.status === 404) return confirmMachineGone(app, fly, machineId);
     throw err;
   }
 }

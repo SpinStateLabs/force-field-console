@@ -222,7 +222,8 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   //    scheduled tick (every 2 minutes) starts the machine. Worst case inline: a few blob writes.
   //  - CANCEL: suspendEstate. The pending flag is persisted BEFORE the first Fly call, then at most
   //    getMachine + [config update] + stop + wait (<= WAIT_S) + up to 4 read-backs, under a 20 s time
-  //    budget (quiesceBudget) checked between calls; a call in flight can add up to its own 20 s Fly
+  //    budget (quiesceBudget) checked between calls (a 404's confirming machine-list call included; an already-suspended
+  //    record's re-verify shares the same budget); a call in flight can add up to its own 20 s Fly
   //    timeout. If the function limit cuts it off, the state is a retryable suspend_pending, never lost.
   if (granting) {
     const estate = await queueEstate(user, now);
