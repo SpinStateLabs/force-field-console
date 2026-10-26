@@ -707,10 +707,13 @@ export async function suspendEstate(
   opts: { requirePending?: boolean } = {},
 ): Promise<Estate> {
   // A suspended estate with a pending flag is one whose machine still needs quieting (a failed resume rollback).
+  // The inline time budget of this call: the re-verify below and the quiesce that may follow share it.
+  let deadline: number | undefined;
   if (e.status === "suspended" && !e.suspend_pending) {
     // The record says suspended: verify it against the machine instead of trusting it (a resume whose start
     // landed but whose wait / read-back failed leaves a RUNNING machine behind a suspended record).
     if (!fly || !e.machine_id) return e;
+    deadline = Date.now() + quiesceBudget.ms;
     let seen: Awaited<ReturnType<FlyClient["getMachine"]>> = null;
     try {
       seen = await fly.getMachine(e.app, e.machine_id);
@@ -719,8 +722,9 @@ export async function suspendEstate(
     }
     if (!seen || seen.state === "destroyed") {
       // A "not found" is trusted only once the app's machine list agrees (confirmMachineGone); a machine
-      // that is still listed (or a list that cannot be read) is quieted below instead.
-      const gone = await confirmMachineGone(e.app, fly, e.machine_id).then(() => true, () => false);
+      // that is still listed (or a list that cannot be read) is quieted below instead. Past the budget the
+      // list call is not made: the quiesce below makes no Fly call either, so the suspension goes pending.
+      const gone = Date.now() <= deadline && (await confirmMachineGone(e.app, fly, e.machine_id).then(() => true, () => false));
       if (gone) return e;
     } else if (seen.state === "stopped") return e;
     logEstate(e, "suspend", "the record says suspended but the machine is running; quieting it down", now);
@@ -789,7 +793,7 @@ export async function suspendEstate(
   }
   if (fly && machineId) {
     try {
-      const r = await quiesceMachine(e.app, fly, machineId, Date.now() + quiesceBudget.ms);
+      const r = await quiesceMachine(e.app, fly, machineId, deadline ?? Date.now() + quiesceBudget.ms);
       logEstate(
         e,
         "suspend",
@@ -881,6 +885,7 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
     return confirmMachineGone(app, fly, machineId);
   };
   try {
+    over(); // a budget already spent by the caller (the suspended-record re-verify) starts no Fly call
     const m = await fly.getMachine(app, machineId);
     if (!m || m.state === "destroyed") return await confirmGone();
     if (!m.config) throw new Error("machine config unreadable");

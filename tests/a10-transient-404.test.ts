@@ -10,7 +10,7 @@ import { ModelFly } from "./model-fly";
 import { freshStore } from "./helpers";
 import { createUser, type User } from "../src/lib/users";
 import { FlyError } from "../src/lib/fly";
-import { ensureMachineRunning, getEstate, queueEstate, quiesceMachine, readback, resumeEstate, reviveEstate, saveEstate, suspendEstate, type Estate } from "../src/lib/estates";
+import { ensureMachineRunning, getEstate, queueEstate, quiesceBudget, quiesceMachine, readback, resumeEstate, reviveEstate, saveEstate, suspendEstate, type Estate } from "../src/lib/estates";
 
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
 
@@ -217,5 +217,85 @@ describe("CX4 review: the quiesce budget covers the confirming list call", () =>
     const calls = counting(fly);
     expect(await quiesceMachine("a", fly as any, "m_9", clock + 1_000)).toBe("gone");
     expect(calls.list).toBe(1);
+  });
+});
+
+// Review round 2 (PL-PR8-R2-02): the re-verify of an already-suspended record (a webhook cancel for an estate
+// that is already suspended) is held to the same inline time budget as the quiesce that may follow it, so a
+// Fly outage cannot stack a read, a confirming list call and a fresh quiesce budget on top of each other.
+// Past the deadline no further Fly call is made: the suspension is persisted as pending and the tick retries.
+describe("CX4 review 2: the suspended-record re-verify shares the inline quiesce budget", () => {
+  let clock = 0;
+  let savedDelay = 0;
+  beforeEach(() => {
+    clock = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    savedDelay = readback.delayMs;
+    readback.delayMs = 0;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    readback.delayMs = savedDelay;
+  });
+
+  function counting(fly: ModelFly) {
+    const calls = { list: 0 };
+    const real = fly.listMachines.bind(fly);
+    fly.listMachines = async () => {
+      calls.list += 1;
+      return real();
+    };
+    return calls;
+  }
+  const suspended = () => estate({ status: "suspended", suspended_from: "ready", suspended_at: new Date().toISOString() });
+
+  it("a 404 that arrives after the deadline is not confirmed inline: no list call, no further Fly call, pending for the tick", async () => {
+    await suspended();
+    const fly = new ModelFly();
+    fly.getReturnsNull = true; // really gone: without the budget check the list call would confirm it inline
+    const realGet = fly.getMachine.bind(fly);
+    fly.getMachine = async (app: string, id: string) => {
+      clock += quiesceBudget.ms + 1; // a Fly outage: the read alone spends the budget
+      return realGet(app, id);
+    };
+    const calls = counting(fly);
+    await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
+    const stored = (await getEstate(user.id))!;
+    expect(calls.list).toBe(0);
+    expect(fly.log.filter((l) => l.startsWith("get "))).toHaveLength(1);
+    expect(stored.status).toBe("suspended");
+    expect(stored.suspend_pending).toBeTruthy(); // the tick (retryPendingSuspend) finishes it
+    expect(stored.machine_id).toBe("m_1");
+  });
+
+  it("a slow read of a running machine is not followed by a fresh quiesce budget: no config write or stop inline, pending for the tick", async () => {
+    await suspended();
+    const fly = new ModelFly();
+    fly.machine("m_1", { state: "started", autostart: true }); // running behind a suspended record
+    const realGet = fly.getMachine.bind(fly);
+    let first = true;
+    fly.getMachine = async (app: string, id: string) => {
+      if (first) clock += quiesceBudget.ms + 1;
+      first = false;
+      return realGet(app, id);
+    };
+    await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
+    const stored = (await getEstate(user.id))!;
+    expect(fly.log.filter((l) => l.startsWith("get "))).toHaveLength(1);
+    expect(fly.log.some((l) => l.startsWith("update ") || l.startsWith("stop "))).toBe(false);
+    expect(stored.status).toBe("suspended");
+    expect(stored.suspend_pending).toBeTruthy();
+  });
+
+  it("within the budget the re-verify still confirms a 404 against the list and leaves the record suspended", async () => {
+    await suspended();
+    const fly = new ModelFly();
+    fly.getReturnsNull = true;
+    const calls = counting(fly);
+    await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
+    const stored = (await getEstate(user.id))!;
+    expect(calls.list).toBe(1);
+    expect(stored.status).toBe("suspended");
+    expect(stored.suspend_pending ?? null).toBeNull();
   });
 });
