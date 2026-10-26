@@ -14,6 +14,7 @@ import { getUserById, saveUser, type User, type Tier } from "./users";
 import {
   GRANTING_STATUSES,
   getSubscription,
+  listCustomerSubscriptions,
   subscriptionPeriodEnd,
   subscriptionPriceId,
   tierForPrice,
@@ -21,7 +22,7 @@ import {
   type StripeConfig,
   type StripeSubscription,
 } from "./stripe";
-import { getEstate, markResumePending, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, suspendEstate, type Estate } from "./estates";
+import { getEstate, markResumePending, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export type WebhookDeps = {
@@ -36,6 +37,17 @@ export type WebhookOutcome = { handled: boolean; note: string };
 export async function alreadyProcessed(eventId: string): Promise<boolean> {
   const store = await portalStore();
   return Boolean(await store.get("stripe_events/" + eventId, { type: "json" }));
+}
+
+/**
+ * True only when the event was handled to completion (status "done"). A claim still
+ * "processing" is NOT done: its delivery may have been killed, so a redelivery must not be
+ * acknowledged as a duplicate (Stripe stops retrying on any 2xx and the event would be lost).
+ */
+export async function eventDone(eventId: string): Promise<boolean> {
+  const store = await portalStore();
+  const rec = (await store.get("stripe_events/" + eventId, { type: "json" })) as { status?: string } | null;
+  return rec?.status === "done";
 }
 
 /**
@@ -165,8 +177,17 @@ export async function releaseCheckout(userId: string, token: string): Promise<vo
   if (read?.data?.token === token) await store.delete(key); // only our own claim
 }
 
-/** Resolve the portal user for a subscription: metadata.user_id first, then the customer pointer. */
-export async function userForSubscription(sub: StripeSubscription): Promise<User | null> {
+/**
+ * Resolve the portal user for a subscription: metadata.user_id first, then the customer pointer.
+ * The pointer exists only after a first APPLIED event of the customer, and Stripe does not order
+ * deliveries: a subscription WITHOUT metadata (created outside Checkout) whose event arrives before
+ * any of the customer's other events was applied would otherwise be dropped for good (200, no retry).
+ * With `deps`, that case asks Stripe live for the customer's subscriptions and takes the user named
+ * by their metadata.user_id: same customer by construction, and exactly one existing portal user
+ * (two different users named on one customer is ambiguous and resolves to nobody). A Stripe failure
+ * throws, so the webhook answers 5xx and Stripe redelivers the event.
+ */
+export async function userForSubscription(sub: StripeSubscription, deps?: Pick<WebhookDeps, "cfg" | "fetchImpl">): Promise<User | null> {
   const metaUser = sub.metadata?.user_id;
   if (metaUser) {
     const u = await getUserById(metaUser);
@@ -174,7 +195,18 @@ export async function userForSubscription(sub: StripeSubscription): Promise<User
   }
   const store = await portalStore();
   const ptr = (await store.get("stripe_customers/" + sub.customer, { type: "json" })) as { user_id: string } | null;
-  return ptr?.user_id ? await getUserById(ptr.user_id) : null;
+  if (ptr?.user_id) return await getUserById(ptr.user_id);
+  if (metaUser || !deps) return null;
+  const siblings = await listCustomerSubscriptions(deps.cfg, String(sub.customer), deps.fetchImpl);
+  const named = new Set<string>();
+  for (const s of siblings) {
+    if (String(s.customer) === String(sub.customer) && s.metadata?.user_id) named.add(s.metadata.user_id);
+  }
+  if (named.size !== 1) {
+    if (named.size > 1) console.warn("billing: customer", sub.customer, "names more than one portal user; subscription", sub.id, "not resolved");
+    return null;
+  }
+  return await getUserById([...named][0]);
 }
 
 /**
@@ -212,7 +244,8 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   //    scheduled tick (every 2 minutes) starts the machine. Worst case inline: a few blob writes.
   //  - CANCEL: suspendEstate. The pending flag is persisted BEFORE the first Fly call, then at most
   //    getMachine + [config update] + stop + wait (<= WAIT_S) + up to 4 read-backs, under a 20 s time
-  //    budget (quiesceBudget) checked between calls; a call in flight can add up to its own 20 s Fly
+  //    budget (quiesceBudget) checked between calls (a 404's confirming machine-list call included; an already-suspended
+  //    record's re-verify shares the same budget); a call in flight can add up to its own 20 s Fly
   //    timeout. If the function limit cuts it off, the state is a retryable suspend_pending, never lost.
   if (granting) {
     const estate = await queueEstate(user, now);
@@ -243,6 +276,8 @@ export function isGrantingUser(u: User | null): boolean {
  *    never just cleared. Failures are recorded (resume_pending: backoff, cap, then flagged).
  *  - billing does not grant and a suspension is pending: retry the stop (conditional on it still
  *    being pending in the stored record, see suspendEstate requirePending).
+ *  - billing does not grant, the record says suspended and `reverify` is set (a machine-config write
+ *    may have landed after the suspension): suspendEstate reads the machine and quiets it down again.
  * NOTE: the lock outlives a killed webhook by up to SUB_LOCK_TTL_MS (5 minutes); until then events
  * for that user are answered 5xx (Stripe redelivers) and the tick reports it as lock_busy/lock_stale.
  */
@@ -250,6 +285,7 @@ export async function retryPendingSuspend(
   userId: string,
   fly: FlyClient,
   now: Date = new Date(),
+  opts: { reverify?: boolean } = {},
 ): Promise<{ outcome: "suspended" | "pending" | "cleared" | "resumed" | "resume_failed"; estate: Estate | null }> {
   const run = async () => {
     const fresh = await getEstate(userId);
@@ -273,7 +309,17 @@ export async function retryPendingSuspend(
       if (fresh.health && /^resume (pending|failed)/.test(fresh.health.note)) fresh.health = null;
       await saveEstate(fresh, now, { owns: ["resume_pending", "health"] as any });
     }
-    if (!fresh.suspend_pending) return { outcome: "cleared" as const, estate: fresh };
+    if (!fresh.suspend_pending) {
+      if (!opts.reverify || fresh.status !== "suspended") return { outcome: "cleared" as const, estate: fresh };
+      // A machine-config write may still be applied by Fly after the suspension (configWriteMarks):
+      // suspendEstate reads the machine here, inside the lock, and quiets it down again if it is awake (the
+      // flag is persisted before the first slow Fly call; a failure leaves it for the normal retries).
+      const r = await suspendEstate(fresh, fly, now, "re-verified: a machine-config write may have landed after the suspension");
+      const stored = (await getEstate(userId)) ?? r;
+      const quiet = stored.status === "suspended" && !stored.suspend_pending;
+      if (quiet) await settleConfigWrite(userId, now);
+      return { outcome: quiet ? ("suspended" as const) : ("pending" as const), estate: stored };
+    }
     const r = await suspendEstate(fresh, fly, now, fresh.suspend_pending.reason, { requirePending: true });
     const stored = (await getEstate(userId)) ?? r;
     return { outcome: stored.status === "suspended" && !stored.suspend_pending ? ("suspended" as const) : stored.suspend_pending ? ("pending" as const) : ("cleared" as const), estate: stored };
@@ -383,7 +429,7 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
   if (type === "customer.subscription.created" || type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
     const sub = obj as StripeSubscription;
     if (!sub?.id || !sub?.customer) return { handled: false, note: "subscription event without id/customer" };
-    const user = await userForSubscription(sub);
+    const user = await userForSubscription(sub, deps);
     if (!user) return { handled: false, note: "no portal user for the subscription" };
     const r = await applyOrdered(user, sub, event, deps);
     if (!r.applied) return { handled: false, note: r.reason === "other_subscription" ? `${type} for ${sub.id} ignored (not the user's current subscription)` : `stale ${type} for ${sub.id} ignored (out of order)` };

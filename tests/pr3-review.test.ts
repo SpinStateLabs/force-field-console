@@ -182,6 +182,7 @@ describe("MED 3: resuming an estate whose machine is gone", () => {
     await estate();
     await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "canceled");
     fly.getReturnsNull = true;
+    fly.listMachines = async () => []; // gone: the app's machine list no longer carries it either (CX4)
     const r = await resumeEstate((await getEstate(user.id))!, fly as any);
     expect(r.status).toBe("error");
     const stored = (await getEstate(user.id))!;

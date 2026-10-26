@@ -173,6 +173,7 @@ describe("revive and resume bookkeeping", () => {
     await paying();
     await estate({ suspend_pending: { ...PENDING } });
     fly.getReturnsNull = true;
+    fly.listMachines = async () => []; // gone: the app's machine list no longer carries it either (CX4)
     const r = await reviveEstate((await getEstate(user.id))!, fly as any);
     expect(r.status).toBe("error");
     const stored = (await getEstate(user.id))!;

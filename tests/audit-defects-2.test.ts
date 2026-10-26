@@ -198,6 +198,7 @@ describe("MED 4/5: bounded, backed-off, sanitised suspend retries", () => {
     await readyEstateFor(user);
     const fly = new StopFly();
     fly.stopError = new FlyError(404, "Fly POST /apps/x/machines/m_1/stop answered HTTP 404");
+    fly.listMachines = async () => []; // gone: the app's machine list no longer carries it either (CX4)
     const r = await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "canceled");
     expect(r.status).toBe("suspended");
     expect(r.suspend_pending ?? null).toBeNull();
