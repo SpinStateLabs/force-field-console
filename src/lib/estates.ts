@@ -503,11 +503,22 @@ export async function advanceEstate(
     return { estate: e, outcome: "done", note: "ready" };
   }
 
+  // Take the lease with a write CONDITIONAL on the stored record (CX3): the check above saw only this
+  // caller's copy, and two drivers (tick + dashboard) holding lease-free copies must not both pass it and
+  // both create a volume / machine. The loser (or a caller whose copy is behind the store) waits.
+  const step = e.step;
   e.lease_until = new Date(now.getTime() + LEASE_MS).toISOString();
-  await saveEstate(e, now);
+  const leased = await saveEstate(e, now, {
+    onlyIf: (cur) =>
+      cur.status === "provisioning" && !cur.suspend_pending && cur.step === step && !(cur.lease_until && new Date(cur.lease_until).getTime() > now.getTime()),
+  });
+  if (!leased) {
+    const cur = await getEstate(e.user_id);
+    if (cur) Object.assign(e, cur);
+    return { estate: e, outcome: "waiting", note: "another driver holds the step lease" };
+  }
   const origin = estateOrigin(e.app);
   const signer = attestSigner(e.grantor);
-  const step = e.step;
 
   try {
     switch (step) {
