@@ -16,7 +16,7 @@ import {
   stripeConfig,
   verifyStripeSignature,
 } from "../../src/lib/stripe";
-import { checkoutIdempotencyKey, claimCheckout, claimEvent, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
+import { checkoutIdempotencyKey, claimCheckout, claimEvent, eventDone, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
 import { flyClientOrNull } from "../../src/lib/fly";
 
 function json(status: number, body: unknown): Response {
@@ -66,7 +66,11 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     }
     // Create-only claim: a redelivery (or a concurrent delivery) of the same event id is a no-op.
     if (!(await claimEvent(event.id, event.type))) {
-      return json(200, { received: true, duplicate: true });
+      // Only a "done" record is a duplicate. A claim still "processing" may belong to a delivery
+      // that was killed (no finally runs); a 2xx here would make Stripe stop retrying and lose the
+      // event. Answer non-2xx so Stripe retries; once the claim is stale its retry takes it over.
+      if (await eventDone(event.id)) return json(200, { received: true, duplicate: true });
+      return err(409, "event_in_progress", "This event is still being applied; Stripe will retry.");
     }
     try {
       const outcome = await handleStripeEvent(event, { cfg, fly: flyClientOrNull() });
