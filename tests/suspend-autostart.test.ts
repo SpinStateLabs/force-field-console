@@ -7,7 +7,8 @@ import { ModelFly, machinesApiHandler } from "./model-fly";
 import { freshStore } from "./helpers";
 import { createUser, type User } from "../src/lib/users";
 import { FlyError, estateMachineConfig, flyConfig } from "../src/lib/fly";
-import { MAX_SUSPEND_RETRIES, checkEstateHealth, getEstate, queueEstate, resumeEstate, saveEstate, suspendEstate, type Estate } from "../src/lib/estates";
+import { MAX_SUSPEND_RETRIES, checkEstateHealth, configWriteMarks, getEstate, machineAwake, queueEstate, readback, resumeEstate, saveEstate, suspendEstate, updateMachineGuarded, type Estate } from "../src/lib/estates";
+import { portalStore } from "../src/lib/store";
 
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
 
@@ -183,6 +184,152 @@ describe("the tick never looks at a suspended estate through the proxy URL", () 
       globalThis.fetch = realFetch;
     }
     expect(seen.filter((u) => u.includes(e.app) || u === "getApp")).toEqual([]);
+    expect(fly.ping("m_1")).toBe("stopped");
+  });
+});
+
+// The production case of the guard above (PL-PR7-R1-01): every armed estate carries a config-write mark
+// (ops/config_write/<user>, written by every guarded machine-config write and never deleted while ready).
+// After a real suspension the tick reads such an estate once per tick through the Machines API (never the
+// proxy URL) until the mark is at least CONFIG_WRITE_SETTLE_MS (30 min) old and the machine was found quiet.
+describe("a suspended estate with a config-write mark: the tick reads it through the Machines API only, until the write has settled", () => {
+  const origDelay = readback.delayMs;
+  beforeEach(() => {
+    readback.delayMs = 1;
+  });
+  afterEach(() => {
+    readback.delayMs = origDelay;
+  });
+
+  /** One tick with the real FlyClient's HTTP calls answered by the Fly model; every URL is recorded. */
+  async function tick(fly: ModelFly, seen: string[]): Promise<Record<string, number>> {
+    const api = machinesApiHandler(fly);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init?: any) => {
+      seen.push(String(url));
+      return (await api(String(url), init)) ?? new Response("", { status: 404 });
+    }) as any;
+    try {
+      return (await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json()).outcomes;
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+  const notMachinesApi = (seen: string[]) => seen.filter((u) => new URL(u).hostname !== "api.machines.dev");
+
+  /** A ready estate that had a guarded config write (the mark), then a real suspension; the Fly log is reset. */
+  async function markedSuspended(): Promise<{ e: Estate; fly: ModelFly }> {
+    process.env.URL = "https://portal.test";
+    const e = await readyEstate();
+    const fly = new ModelFly();
+    await updateMachineGuarded(e, fly as any, (cur) => cur ?? { image: "img", services: [{ internal_port: 8080, autostart: true }] } as any, { readCurrent: true });
+    expect((await configWriteMarks()).has(user.id)).toBe(true);
+    const s = await suspend(fly);
+    expect(s.status).toBe("suspended");
+    expect(fly.ping("m_1")).toBe("stopped");
+    fly.log.length = 0;
+    return { e, fly };
+  }
+
+  it("fresh mark: one Machines-API read, zero origin requests, the mark is kept and the machine stays stopped", async () => {
+    const { fly } = await markedSuspended();
+    const seen: string[] = [];
+    expect(await tick(fly, seen)).toEqual({ suspend_retry_ok: 1 });
+    expect(fly.log).toEqual(["get m_1"]);
+    expect(notMachinesApi(seen)).toEqual([]);
+    expect((await configWriteMarks()).has(user.id)).toBe(true);
+    const stored = (await getEstate(user.id))!;
+    expect(stored.status).toBe("suspended");
+    expect(stored.suspend_pending).toBeFalsy();
+    expect(fly.ping("m_1")).toBe("stopped");
+  });
+
+  it("mark older than 30 min: read once, the mark is deleted, and the next tick makes no Fly call at all", async () => {
+    const { fly } = await markedSuspended();
+    await (await portalStore()).setJSON("ops/config_write/" + user.id, { at: new Date(Date.now() - 31 * 60_000).toISOString() });
+    const seen: string[] = [];
+    expect(await tick(fly, seen)).toEqual({ suspend_retry_ok: 1 });
+    expect(fly.log).toEqual(["get m_1"]);
+    expect(notMachinesApi(seen)).toEqual([]);
+    expect((await configWriteMarks()).has(user.id)).toBe(false);
+
+    fly.log.length = 0;
+    const seen2: string[] = [];
+    expect(await tick(fly, seen2)).toEqual({});
+    expect(fly.log).toEqual([]);
+    expect(seen2).toEqual([]);
+    expect(fly.ping("m_1")).toBe("stopped");
+  });
+
+  it("a late autostart-on write that landed after the suspension is quieted again on the next tick", async () => {
+    const { fly } = await markedSuspended();
+    // Fly applies the abandoned guarded update late: the stopped machine's proxy autostart is back on.
+    fly.machine("m_1").config.services[0].autostart = true;
+    const seen: string[] = [];
+    expect(await tick(fly, seen)).toEqual({ suspend_retry_ok: 1 });
+    expect(fly.log).toContain("update m_1 autostart=false skip=true");
+    expect(fly.log).not.toContain("stop m_1");
+    expect(fly.log.filter((l) => l === "get m_1").length).toBeGreaterThanOrEqual(4); // re-verify, quiesce read, two read-backs
+    expect(notMachinesApi(seen)).toEqual([]);
+    expect(fly.ping("m_1")).toBe("stopped");
+    const stored = (await getEstate(user.id))!;
+    expect(stored.status).toBe("suspended");
+    expect(stored.suspend_pending).toBeFalsy();
+  });
+});
+
+const suspendedRecord = { status: "suspended" as const, suspended_from: "ready" as const, suspended_at: new Date().toISOString() };
+
+// PL-PR7-R1-03: quiesceMachine treats a machine whose config cannot be read as an error; the re-check behind a
+// suspended record must not treat the same machine as quiet (fail-open).
+describe("a stopped machine whose config cannot be read is not trusted behind a suspended record", () => {
+  it("machineAwake: stopped with no readable config counts as awake; stopped with every autostart off is quiet", () => {
+    expect(machineAwake({ state: "stopped", config: null })).toBe(true);
+    expect(machineAwake({ state: "stopped" })).toBe(true);
+    expect(machineAwake({ state: "stopped", config: { image: "img", services: [{ internal_port: 8080, autostart: false }] } as any })).toBe(false);
+    expect(machineAwake({ state: "destroyed", config: null })).toBe(false);
+    expect(machineAwake(null)).toBe(false);
+  });
+
+  it("the re-verify goes pending (gateway refuses, the tick retries) instead of trusting the record; no config write, no stop", async () => {
+    await readyEstate(suspendedRecord);
+    const fly = new ModelFly();
+    fly.machine("m_1", { state: "stopped" }).config = null;
+    const r = await suspend(fly);
+    expect(r.status).toBe("suspended");
+    expect(r.suspend_pending).toBeTruthy();
+    expect(r.suspend_pending!.attempts).toBe(1);
+    expect(r.health?.note).toMatch(/suspend pending/);
+    expect(fly.log.filter((l) => l.startsWith("update") || l.startsWith("stop"))).toEqual([]);
+    expect(r.log.some((l) => /the machine config could not be read/.test(l.note))).toBe(true);
+    expect((await getEstate(user.id))!.suspend_pending).toBeTruthy();
+  });
+});
+
+// PL-PR8-R4-04: a transient state (starting / replacing) behind a suspended record is awake: quieted (stop with
+// read-back), never trusted as quiet and never taken as "gone".
+describe("a transient machine state behind a suspended record is quieted, not trusted and not taken as gone", () => {
+  const origDelay = readback.delayMs;
+  beforeEach(() => {
+    readback.delayMs = 1;
+  });
+  afterEach(() => {
+    readback.delayMs = origDelay;
+  });
+
+  it.each(["starting", "replacing"])("state %s: the re-verify stops the machine and keeps the record suspended", async (state) => {
+    await readyEstate(suspendedRecord);
+    const fly = new ModelFly();
+    fly.machine("m_1", { state, autostart: false });
+    (fly as any).bootAt = Date.now() + 3_600_000; // the model would otherwise finish a "starting" boot on the first read
+    const r = await suspend(fly);
+    expect(r.status).toBe("suspended");
+    expect(r.suspend_pending).toBeFalsy();
+    expect(fly.log[0]).toBe("get m_1");
+    expect(fly.log).toContain("stop m_1");
+    expect(fly.machine("m_1").state).toBe("stopped");
+    expect(r.log.some((l) => /stopped with proxy autostart disabled \(verified by read-back\)/.test(l.note))).toBe(true);
+    expect(r.log.some((l) => /already gone/.test(l.note))).toBe(false);
     expect(fly.ping("m_1")).toBe("stopped");
   });
 });

@@ -120,4 +120,25 @@ describe("CX3 concurrent provisioning drivers", () => {
     expect(later.outcome).toBe("progressed");
     expect(fly.creates).toEqual(["machine m1"]);
   });
+
+  it("a driver whose copy predates a pending suspension takes no lease and creates nothing (the lease's stored suspend_pending clause)", async () => {
+    await atStep("create_machine", { volume_id: "vol_0" });
+    const stale = (await getEstate(user.id))!;
+    // A cancel lands while create_machine may be in flight: the STORED record now carries suspend_pending.
+    const s = await suspendEstate((await getEstate(user.id))!, fly as any, new Date(), "subscription canceled");
+    expect(s.suspend_pending).toBeTruthy();
+    expect(stale.suspend_pending).toBeFalsy();
+    // The stale copy passes the copy-side checks; only the conditional lease write can stop it.
+    const r = await advanceEstate(stale, fly as any);
+    expect(r.outcome).toBe("waiting");
+    expect(r.estate.suspend_pending).toBeTruthy();
+    expect(fly.creates).toEqual([]);
+    expect([...fly.machines.keys()]).toEqual([]);
+    const stored = (await getEstate(user.id))!;
+    expect(stored.suspend_pending).toBeTruthy();
+    expect(stored.status).toBe("provisioning");
+    expect(stored.step).toBe("create_machine");
+    expect(stored.machine_id ?? null).toBeNull();
+    expect(stored.lease_until ?? null).toBeNull();
+  });
 });

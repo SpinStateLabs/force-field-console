@@ -226,6 +226,11 @@ verified, not what a mature SaaS would do.
     first real estate provisions through the site.
   - **Billing: no live Stripe checkout has been performed** (test mode or live). Until an
     operator runs one, treat "sells the paid tiers" as Declared, not Enforced.
+- **Suspension re-verify window is inferred.** After a suspension the tick re-reads an estate
+  that had a recent machine-config write until `CONFIG_WRITE_SETTLE_MS` (30 min) has passed and
+  the machine was found quiet; that window is INFERRED (a ~20 s update was seen live), so an
+  abandoned Fly update applied later than that, after a quiet look, escapes until a later Stripe
+  event or an operator acts.
 - **Reads are strongly consistent** (`consistency: "strong"` on the store: every read goes to
   the origin). With the client's default eventual reads, a registration's own follow-up read
   missed the new user for about 13 s in production (measured 2026-09-14 after the blobs upgrade;
