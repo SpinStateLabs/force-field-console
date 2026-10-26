@@ -84,11 +84,17 @@ export async function claimEvent(eventId: string, type: string, now: Date = new 
  * Two OTHER events in the same second cannot be ordered by `created` (G2). When the caller passes
  * resolveTie, such a tie is resolved from Stripe's live subscription instead of the payload that
  * happened to arrive last: resolveTie fetches it (the caller then applies that object) and returns
- * its status, which the mark records. A failing fetch throws, so the event is redelivered.
+ * its status, which the mark records (with tie: true). A failing fetch throws, so the event is redelivered.
+ * A redelivery of the event that set a live-resolved mark (its apply failed after the mark CAS) is resolved
+ * from the live subscription again, never from its payload: the mark's tie flag (or a recorded status that
+ * differs from the payload) says the payload was not what was applied.
+ * Cost: ties are routine at checkout (checkout.session.completed and customer.subscription.created/updated
+ * often share a second), so expect one or two extra subscription GETs per new subscription, each bounded
+ * by the Stripe client's request timeout, inside the user lock and before anything is persisted.
  *
  * Events without a numeric `created` (never from Stripe) are applied unordered.
  */
-export type SubMark = { created: number; status: string; event_id: string };
+export type SubMark = { created: number; status: string; event_id: string; tie?: true };
 
 export async function advanceSubscriptionMark(
   subId: string,
@@ -107,9 +113,11 @@ export async function advanceSubscriptionMark(
     if (mark && mark.event_id !== eventId) {
       if (created < mark.created) return false;
       if (created === mark.created && mark.status === "canceled") return false;
-      if (created === mark.created && resolveTie && liveStatus === null) liveStatus = await resolveTie();
     }
-    const next: SubMark = { created, status: liveStatus ?? status, event_id: eventId };
+    // A tie with another event, or a redelivery of the event that set a live-resolved mark.
+    const tied = !!mark && created === mark.created && (mark.event_id !== eventId || mark.tie === true || mark.status !== status);
+    if (tied && resolveTie && liveStatus === null) liveStatus = await resolveTie();
+    const next: SubMark = liveStatus === null ? { created, status, event_id: eventId } : { created, status: liveStatus, event_id: eventId, tie: true };
     if (read ? await store.setJSONIfMatch(key, next, read.etag) : await store.setJSONIfNew(key, next)) return true;
   }
   throw new Error("subscription mark kept changing; the event will be redelivered");
@@ -301,7 +309,7 @@ async function applyOrdered(
   event: any,
   deps: WebhookDeps,
   isLive = false,
-): Promise<{ applied: boolean; tier?: Tier; reason?: "stale" | "other_subscription" }> {
+): Promise<{ applied: boolean; tier?: Tier; status?: string; reason?: "stale" | "other_subscription" }> {
   return withUserLock(user.id, async () => {
     // G2: a same-second tie with another event is resolved from the live subscription (sub is already
     // live for checkout.session.completed, so no second read there).
@@ -343,12 +351,12 @@ async function applyOrdered(
         if (grantsTier(deps, cand)) {
           if (!cand.metadata?.user_id) cand.metadata = { ...(cand.metadata ?? {}), user_id: fresh.id };
           fresh.billing = { ...cur, other_subs: Object.keys(rest).length ? rest : undefined };
-          return { applied: true, tier: await applySubscription(fresh, cand, deps) };
+          return { applied: true, tier: await applySubscription(fresh, cand, deps), status: sub.status };
         }
       }
       fresh.billing = { ...cur, other_subs: undefined };
     }
-    return { applied: true, tier: await applySubscription(fresh, sub, deps) };
+    return { applied: true, tier: await applySubscription(fresh, sub, deps), status: sub.status };
   });
 }
 
@@ -378,7 +386,7 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
     if (!user) return { handled: false, note: "no portal user for the subscription" };
     const r = await applyOrdered(user, sub, event, deps);
     if (!r.applied) return { handled: false, note: r.reason === "other_subscription" ? `${type} for ${sub.id} ignored (not the user's current subscription)` : `stale ${type} for ${sub.id} ignored (out of order)` };
-    return { handled: true, note: `${type}; status ${sub.status}; tier ${r.tier}` };
+    return { handled: true, note: `${type}; status ${r.status ?? sub.status}; tier ${r.tier}` };
   }
 
   return { handled: false, note: `ignored event type ${type || "(none)"}` };
