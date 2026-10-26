@@ -17,6 +17,7 @@
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20.14.0",
+    "fast-check": "^3.23.2",
     "typescript": "^5.5.0",
     "vitest": "^2.1.0"
   },

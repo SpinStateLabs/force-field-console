@@ -67,6 +67,39 @@ export class ModelFly {
   staleAfterUpdate = 0; // after EVERY update the next N reads are stale
   private snapshot: ModelMachine | null = null;
 
+  // --- opt-in faithful mode (defaults keep the behaviour every existing test was written against) ---
+  /** No lazy creation: an unknown or destroyed machine answers 404 (getMachine -> null, writes throw FlyError 404). */
+  strict = false;
+  /** Eventually consistent reads: with probability eventualP a read returns ANY version current within the last eventualMs. */
+  eventualMs = 0;
+  eventualP = 0;
+  /** Probability that any call fails with 500 / 502 / 503 / 429 before it is applied. */
+  p5xx = 0;
+  /** Honour the wait timeout: a wait whose waitDelay exceeds timeoutS answers false (Fly's 408) after timeoutS. */
+  honourWaitTimeout = false;
+  rand: () => number = Math.random;
+  private history = new Map<string, { at: number; state: string; config: any }[]>();
+
+  private record(m: ModelMachine): void {
+    if (!this.eventualMs) return;
+    const h = this.history.get(m.id) ?? [];
+    h.push({ at: Date.now(), state: m.state, config: structuredClone(m.config) });
+    if (h.length > 30) h.shift();
+    this.history.set(m.id, h);
+  }
+  private maybe5xx(op: string, id: string): void {
+    if (this.p5xx > 0 && this.rand() < this.p5xx) throw flyErr([500, 502, 503, 429][Math.floor(this.rand() * 4)], op, id);
+  }
+  private gone(id: string): boolean {
+    const m = this.machines.get(id);
+    return this.strict && (!m || m.state === "destroyed");
+  }
+  /** Fly destroys the machine (operator, host loss): later calls answer 404 in strict mode. */
+  destroy(id: string): void {
+    const m = this.machines.get(id);
+    if (m) m.state = "destroyed";
+  }
+
   machine(id: string, over: Partial<ModelMachine> & { autostart?: boolean } = {}): ModelMachine {
     let m = this.machines.get(id);
     if (m && m.state === "starting" && Date.now() >= this.bootAt) m.state = "started";
@@ -81,6 +114,16 @@ export class ModelFly {
     this.log.push("get " + id);
     if (this.failGet) throw flyErr(500, "", id);
     if (this.getReturnsNull) return null;
+    this.maybe5xx("", id);
+    if (this.gone(id)) return null; // FlyClient.getMachine maps 404 to null
+    if (this.eventualMs && this.rand() < this.eventualP) {
+      const lo = Date.now() - this.eventualMs;
+      const h = (this.history.get(id) ?? []).filter((v, i, a) => v.at >= lo || a[i + 1] === undefined || a[i + 1].at >= lo);
+      if (h.length) {
+        const v = h[Math.floor(this.rand() * h.length)];
+        return { ...structuredClone(this.machine(id)), state: v.state, config: structuredClone(v.config) };
+      }
+    }
     if (this.staleReads > 0 && this.snapshot && this.snapshot.id === id) {
       this.staleReads -= 1;
       return structuredClone(this.snapshot);
@@ -90,8 +133,9 @@ export class ModelFly {
 
   async updateMachine(_app: string, id: string, config: any, opts: { skipLaunch?: boolean } = {}): Promise<any> {
     this.log.push(`update ${id} autostart=${config.services?.[0]?.autostart} skip=${Boolean(opts.skipLaunch)}`);
-    if (this.updateThrows404) throw new FlyError(404, "gone");
+    if (this.updateThrows404 || this.gone(id)) throw new FlyError(404, "gone");
     if (this.failUpdate || (this.failUpdateAfter !== null && this.updatesDone >= this.failUpdateAfter)) throw flyErr(500, "", id);
+    this.maybe5xx("", id);
     const m = this.machine(id);
     this.snapshot = structuredClone(m);
     const d = this.updateDelayOnce || this.updateDelay;
@@ -104,6 +148,7 @@ export class ModelFly {
       if (m.state === "started") this.restarts += 1;
       m.state = "started"; // an update launches the machine unless skip_launch
     }
+    this.record(m);
     return structuredClone(m);
   }
 
@@ -112,7 +157,10 @@ export class ModelFly {
     await sleep(this.stopDelay);
     if (this.failStopWith) throw this.failStopWith;
     if (this.failStop) throw flyErr(503, "stop", id);
+    if (this.gone(id)) throw new FlyError(404, "gone");
+    this.maybe5xx("stop", id);
     if (!this.stopNoop) this.machine(id).state = "stopped";
+    this.record(this.machine(id));
   }
 
   async startMachine(_app: string, id: string): Promise<void> {
@@ -120,16 +168,24 @@ export class ModelFly {
     await sleep(this.startDelay);
     if (this.failStartWith) throw this.failStartWith;
     if (this.failStart) throw flyErr(503, "start", id);
+    if (this.gone(id)) throw new FlyError(404, "gone");
+    this.maybe5xx("start", id);
     if (this.bootMs > 0) {
       this.machine(id).state = "starting";
       this.bootAt = Date.now() + this.bootMs;
     } else this.machine(id).state = "started";
+    this.record(this.machine(id));
   }
 
   waits: { state: string; timeoutS: number }[] = [];
   async waitMachine(_app: string, id: string, state: string, timeoutS = 30): Promise<boolean> {
     this.log.push(`wait ${id} ${state}`);
     this.waits.push({ state, timeoutS });
+    if (this.gone(id)) throw new FlyError(404, "gone");
+    if (this.honourWaitTimeout && this.waitDelay > timeoutS * 1000) {
+      await sleep(timeoutS * 1000);
+      return false;
+    }
     await sleep(this.waitDelay);
     if (state === "started" && this.machine(id).state === "starting") await sleep(Math.max(0, this.bootAt - Date.now()) + 2);
     if (this.waitLies) return true;
@@ -151,8 +207,12 @@ export class ModelFly {
 
   /** An inbound request through the Fly proxy: starts a stopped machine whose autostart is on (or unset). */
   ping(id: string): string {
+    if (this.gone(id)) return "gone";
     const m = this.machine(id);
-    if (m.state === "stopped" && (m.config.services ?? []).some((s: any) => s.autostart !== false)) m.state = "started";
+    if (m.state === "stopped" && (m.config.services ?? []).some((s: any) => s.autostart !== false)) {
+      m.state = "started";
+      this.record(m);
+    }
     return m.state;
   }
 
