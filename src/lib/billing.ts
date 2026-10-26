@@ -114,7 +114,8 @@ export async function advanceSubscriptionMark(
       if (created < mark.created) return false;
       if (created === mark.created && mark.status === "canceled") return false;
     }
-    // A tie with another event, or a redelivery of the event that set a live-resolved mark.
+    // A tie with another event, or a redelivery of the event that set a live-resolved mark. The status
+    // clause covers a mark without the tie flag (none is written by this code; kept as a guard, pinned by a test).
     const tied = !!mark && created === mark.created && (mark.event_id !== eventId || mark.tie === true || mark.status !== status);
     if (tied && resolveTie && liveStatus === null) liveStatus = await resolveTie();
     const next: SubMark = liveStatus === null ? { created, status, event_id: eventId } : { created, status: liveStatus, event_id: eventId, tie: true };

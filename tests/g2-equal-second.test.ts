@@ -255,4 +255,24 @@ describe("CX6 review round 1: retries, mark contents, live-object checks", () =>
     expect((await getEstate(user.id))!.status).toBe("ready");
     expect(fly.calls).toEqual([]);
   });
+
+  // Review round 2 (PL-PR6-R2-02). The status clause of the tie test: a mark WITHOUT the tie flag whose
+  // recorded status differs from the redelivered payload of the same event id (no writer in this code
+  // produces one today; a hand-repaired mark or an older writer could). The payload was not what was
+  // applied, so the redelivery must be resolved from the live subscription, never from its payload.
+  it("a plain mark whose status differs from the same event's redelivered payload re-resolves from live", async () => {
+    live = { status: "active" };
+    await handleStripeEvent(ev("e_active", 1000, "active"), deps());
+    await store.setJSON("stripe_subs/sub_1", { created: 1000, status: "active", event_id: "e_paused" });
+    await handleStripeEvent(ev("e_paused", 1000, "paused"), deps());
+    const u = (await getUserById(user.id))!;
+    const e = (await getEstate(user.id))!;
+    expect(u.tier).toBe("operator");
+    expect(u.billing?.status).toBe("active");
+    expect(e.status).not.toBe("suspended");
+    expect(e.suspend_pending ?? null).toBeNull();
+    expect(fly.calls).toEqual([]);
+    expect(stripeGets.length).toBe(1);
+    expect(await mark()).toEqual({ created: 1000, status: "active", event_id: "e_paused", tie: true });
+  });
 });
