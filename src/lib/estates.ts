@@ -742,7 +742,14 @@ export async function suspendEstate(
       // request (a config write whose Fly update landed after the suspension leaves exactly that behind).
       return e;
     }
-    logEstate(e, "suspend", seen?.state === "stopped" ? "the record says suspended but proxy autostart is on; quieting the machine down" : "the record says suspended but the machine is running; quieting it down", now);
+    // Log wording only: on the not-found-but-unconfirmed path (still listed, list failed, or over budget) the
+    // machine's state is unknown, so the text must not claim it is running.
+    const why =
+      !seen || seen.state === "destroyed" ? "the machine reads as not found and that could not be confirmed (state unknown)"
+      : seen.state !== "stopped" ? (seen.state === "started" ? "the machine is running" : "the machine is not stopped")
+      : seen.config ? "proxy autostart is on"
+      : "the machine config could not be read";
+    logEstate(e, "suspend", `the record says suspended but ${why}; quieting the machine down`, now);
   }
   const onlyIf = opts.requirePending ? (cur: Estate) => Boolean(cur.suspend_pending) : undefined;
   const flag = (failed: boolean, attempts: number, note: string, next: Date | null, prior: SuspendPending | null | undefined) => {
@@ -839,12 +846,13 @@ export async function suspendEstate(
 /**
  * Can this machine bill behind a suspended record? Running (anything but stopped / destroyed), or stopped
  * with any service's proxy autostart on (the next inbound request starts it). A stopped machine whose
- * config cannot be read counts as quiet (nothing to compare); null / destroyed is gone.
+ * config cannot be read counts as awake, the same as quiesceMachine treats it (an error, retried): the
+ * re-check must not fail open. Null / destroyed is gone.
  */
 export function machineAwake(m: { state?: string; config?: MachineConfig | null } | null | undefined): boolean {
   if (!m || m.state === "destroyed") return false;
   if (m.state !== "stopped") return true;
-  return Boolean(m.config) && (m.config!.services ?? []).some((s: any) => s.autostart !== false);
+  return !m.config || (m.config.services ?? []).some((s: any) => s.autostart !== false);
 }
 
 /** A pending suspension is moot (the subscription is active again): drop it; the machine was never stopped. */
