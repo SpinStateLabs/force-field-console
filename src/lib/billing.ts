@@ -22,7 +22,7 @@ import {
   type StripeConfig,
   type StripeSubscription,
 } from "./stripe";
-import { getEstate, markResumePending, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, suspendEstate, type Estate } from "./estates";
+import { getEstate, markResumePending, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export type WebhookDeps = {
@@ -37,6 +37,17 @@ export type WebhookOutcome = { handled: boolean; note: string };
 export async function alreadyProcessed(eventId: string): Promise<boolean> {
   const store = await portalStore();
   return Boolean(await store.get("stripe_events/" + eventId, { type: "json" }));
+}
+
+/**
+ * True only when the event was handled to completion (status "done"). A claim still
+ * "processing" is NOT done: its delivery may have been killed, so a redelivery must not be
+ * acknowledged as a duplicate (Stripe stops retrying on any 2xx and the event would be lost).
+ */
+export async function eventDone(eventId: string): Promise<boolean> {
+  const store = await portalStore();
+  const rec = (await store.get("stripe_events/" + eventId, { type: "json" })) as { status?: string } | null;
+  return rec?.status === "done";
 }
 
 /**
@@ -242,6 +253,8 @@ export function isGrantingUser(u: User | null): boolean {
  *    never just cleared. Failures are recorded (resume_pending: backoff, cap, then flagged).
  *  - billing does not grant and a suspension is pending: retry the stop (conditional on it still
  *    being pending in the stored record, see suspendEstate requirePending).
+ *  - billing does not grant, the record says suspended and `reverify` is set (a machine-config write
+ *    may have landed after the suspension): suspendEstate reads the machine and quiets it down again.
  * NOTE: the lock outlives a killed webhook by up to SUB_LOCK_TTL_MS (5 minutes); until then events
  * for that user are answered 5xx (Stripe redelivers) and the tick reports it as lock_busy/lock_stale.
  */
@@ -249,6 +262,7 @@ export async function retryPendingSuspend(
   userId: string,
   fly: FlyClient,
   now: Date = new Date(),
+  opts: { reverify?: boolean } = {},
 ): Promise<{ outcome: "suspended" | "pending" | "cleared" | "resumed" | "resume_failed"; estate: Estate | null }> {
   const run = async () => {
     const fresh = await getEstate(userId);
@@ -272,7 +286,17 @@ export async function retryPendingSuspend(
       if (fresh.health && /^resume (pending|failed)/.test(fresh.health.note)) fresh.health = null;
       await saveEstate(fresh, now, { owns: ["resume_pending", "health"] as any });
     }
-    if (!fresh.suspend_pending) return { outcome: "cleared" as const, estate: fresh };
+    if (!fresh.suspend_pending) {
+      if (!opts.reverify || fresh.status !== "suspended") return { outcome: "cleared" as const, estate: fresh };
+      // A machine-config write may still be applied by Fly after the suspension (configWriteMarks):
+      // suspendEstate reads the machine here, inside the lock, and quiets it down again if it is awake (the
+      // flag is persisted before the first slow Fly call; a failure leaves it for the normal retries).
+      const r = await suspendEstate(fresh, fly, now, "re-verified: a machine-config write may have landed after the suspension");
+      const stored = (await getEstate(userId)) ?? r;
+      const quiet = stored.status === "suspended" && !stored.suspend_pending;
+      if (quiet) await settleConfigWrite(userId, now);
+      return { outcome: quiet ? ("suspended" as const) : ("pending" as const), estate: stored };
+    }
     const r = await suspendEstate(fresh, fly, now, fresh.suspend_pending.reason, { requirePending: true });
     const stored = (await getEstate(userId)) ?? r;
     return { outcome: stored.status === "suspended" && !stored.suspend_pending ? ("suspended" as const) : stored.suspend_pending ? ("pending" as const) : ("cleared" as const), estate: stored };
