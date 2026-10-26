@@ -874,9 +874,15 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
   const over = () => {
     if (deadline !== undefined && Date.now() > deadline) throw new Error("quiesce time budget exceeded");
   };
+  // The confirming list call is a Fly call too (up to its own timeout), so the budget is checked before it:
+  // past the deadline a "not found" is left to the tick (pending + retry) instead of confirmed inline.
+  const confirmGone = () => {
+    over();
+    return confirmMachineGone(app, fly, machineId);
+  };
   try {
     const m = await fly.getMachine(app, machineId);
-    if (!m || m.state === "destroyed") return await confirmMachineGone(app, fly, machineId);
+    if (!m || m.state === "destroyed") return await confirmGone();
     if (!m.config) throw new Error("machine config unreadable");
     over();
     if ((m.config.services ?? []).some((s: any) => s.autostart !== false)) {
@@ -891,7 +897,7 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
     for (let i = 0; i < readback.tries; i++) {
       over();
       const v = await fly.getMachine(app, machineId);
-      if (!v || v.state === "destroyed") return await confirmMachineGone(app, fly, machineId);
+      if (!v || v.state === "destroyed") return await confirmGone();
       if (v.state !== "stopped") {
         why = "read-back: machine is not stopped";
         agree = 0;
@@ -905,7 +911,7 @@ export async function quiesceMachine(app: string, fly: FlyClient, machineId: str
     }
     throw new Error(why);
   } catch (err: any) {
-    if (err instanceof FlyError && err.status === 404) return confirmMachineGone(app, fly, machineId);
+    if (err instanceof FlyError && err.status === 404) return confirmGone();
     throw err;
   }
 }
