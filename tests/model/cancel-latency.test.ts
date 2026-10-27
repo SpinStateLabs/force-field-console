@@ -6,6 +6,8 @@
 //  - the stop fails once: the first retry is due 2 minutes later and the next tick after that stops it;
 //  - Fly is down for an hour: retries back off 2, 4, 8, 16, 32 min, so the machine is stopped at the first
 //    retry after the outage ends (62 min after the cancellation), not later;
+//  - Fly is down until the suspension is marked failed (10 attempts, about 5 h): once the faults clear it is stopped at
+//    the next slow retry (SLOW_RETRY_MS, 6 h), inside L5_RECOVERY_BOUND_MS as the harness measures it;
 //  - the webhook is killed at any I/O point: it is stopped once the killed invocation's leftovers have expired: its user
 //    lock (SUB_LOCK_TTL_MS, 5 min) and its "processing" claim on the event (STALE_CLAIM_MS, 10 min), plus Stripe's redelivery.
 //    Measured 2026-10-27: crash points before the pending flag was persisted 12.5 min, after it 6.5 min, late ones 1.5 s.
@@ -78,6 +80,28 @@ describe("cancel-to-stopped latency (the portal's own retry clock)", () => {
     const stopped = r.billingAfterCancelMs[0];
     expect(stopped).toBeGreaterThan(60 * MIN);
     expect(stopped).toBeLessThanOrEqual(1000 + 30_000 + 62 * MIN + TICK + 15_000);
+  });
+
+  it("Fly is down until the suspension is marked failed: once the faults clear it is stopped at the next slow retry, inside the L5 recovery bound", async () => {
+    // attempt 1 is the webhook's; the retries fall at about +2, +6, +14, +30, +62, +122, +182, +242 and +302 min, and the
+    // 10th failed attempt (MAX_SUSPEND_RETRIES) marks it failed with the next (slow) retry 6 h later. The outage covers all
+    // ten (160 ticks, 320 min); quiescence then clears the faults and the slow retry stops the machine. L5 (harness.ts)
+    // measures that from the start of quiescence, so a slower schedule (a longer SLOW_RETRY_MS) shows up as an L5 violation.
+    const r = await runCase(
+      sc([
+        { k: "fault", f: { p5xxBefore: 1 }, stripeTimeout: 0 },
+        ...cancel,
+        deliver(),
+        ...ticks(160),
+      ]),
+    );
+    expect(r.violations).toEqual([]);
+    expect(r.cancelLatency).toHaveLength(1);
+    const { sinceRecoveryMs, faultFree } = r.cancelLatency[0];
+    expect(faultFree).toBe(false);
+    // the slow retry is due about 302 + 360 = 662 min after the flag; quiescence starts at about 321 min
+    expect(sinceRecoveryMs).toBeGreaterThan(5 * 3_600_000);
+    expect(sinceRecoveryMs).toBeLessThanOrEqual(L5_RECOVERY_BOUND_MS);
   });
 
   it("the webhook is killed at any I/O point: stopped once its lock (5 min) and its event claim (10 min) have expired, and not later", async () => {
