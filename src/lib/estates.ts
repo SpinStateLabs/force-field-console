@@ -1168,13 +1168,40 @@ export async function configWriteMarks(): Promise<Set<string>> {
   return new Set(blobs.map((b) => b.key.slice(CONFIG_WRITE_PREFIX.length)));
 }
 
+/** The mark: the start of the latest guarded write, plus the tick's re-verify backoff (absent until a read fails). */
+type ConfigWriteMark = { at?: string; reverify_failures?: number; reverify_next_at?: string | null };
+
 /** Drop the mark once the write has settled; call under the user lock, after the machine was found quiet. */
 export async function settleConfigWrite(userId: string, now: Date): Promise<void> {
   const store = await portalStore();
-  const v = (await store.get(configWriteKey(userId), { type: "json" })) as { at?: string } | null;
+  const v = (await store.get(configWriteKey(userId), { type: "json" })) as ConfigWriteMark | null;
   if (!v) return;
   const at = v.at ? Date.parse(v.at) || 0 : 0;
   if (now.getTime() - at >= CONFIG_WRITE_SETTLE_MS) await store.delete(configWriteKey(userId));
+  else if (v.reverify_failures || v.reverify_next_at) await store.setJSON(configWriteKey(userId), { at: v.at }); // a clean look ends the backoff
+}
+
+/**
+ * The tick's re-verify of a suspended record reads the machine; when that read throws (a Fly error that is
+ * not a 404: an outage, a 5xx, a timeout) the failure is recorded on the config-write mark so the next looks
+ * back off: 2, 4, 8, 16, 32 min, then 60 min, capped (the same schedule as a failed stop). Without it the tick
+ * would repeat the failing read every 2 minutes for as long as Fly is down. Call under the user lock. A 404
+ * never gets here (suspendEstate answers it itself, confirmed against the machine list).
+ */
+export async function recordReverifyFailure(userId: string, now: Date): Promise<void> {
+  const store = await portalStore();
+  const v = (await store.get(configWriteKey(userId), { type: "json" })) as ConfigWriteMark | null;
+  if (!v) return; // the mark is gone: nothing re-verifies this estate any more
+  const n = Math.min((v.reverify_failures ?? 0) + 1, 30);
+  const delay = Math.min(SUSPEND_BACKOFF_BASE_MS * 2 ** (n - 1), SUSPEND_BACKOFF_MAX_MS);
+  await store.setJSON(configWriteKey(userId), { ...v, reverify_failures: n, reverify_next_at: new Date(now.getTime() + delay).toISOString() });
+}
+
+/** When the next re-verify read is allowed, or null when no backoff is running. Call under the user lock. */
+export async function reverifyBackoffUntil(userId: string): Promise<Date | null> {
+  const v = (await (await portalStore()).get(configWriteKey(userId), { type: "json" })) as ConfigWriteMark | null;
+  const t = v?.reverify_next_at ? Date.parse(v.reverify_next_at) : NaN;
+  return Number.isFinite(t) ? new Date(t) : null;
 }
 
 /** Place the customer's Anthropic key as an estate secret (never stored in the portal); the machine restarts. */
