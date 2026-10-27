@@ -97,6 +97,7 @@ export default async (_req: Request): Promise<Response> => {
         : r.outcome === "resumed" ? "resume_retry_ok"
         : r.outcome === "resume_failed" ? "resume_retry_failed"
         : r.outcome === "cleared" ? "suspend_retry_cleared"
+        : r.outcome === "backoff" ? "reverify_backoff"
         : "suspend_retry_failed",
       );
       if (r.estate?.suspend_pending?.failed && !e.suspend_pending?.failed) failedSuspends += 1;

@@ -230,7 +230,18 @@ verified, not what a mature SaaS would do.
   that had a recent machine-config write until `CONFIG_WRITE_SETTLE_MS` (30 min) has passed and
   the machine was found quiet; that window is INFERRED (a ~20 s update was seen live), so an
   abandoned Fly update applied later than that, after a quiet look, escapes until a later Stripe
-  event or an operator acts.
+  event or an operator acts. If the look itself fails (a Fly error other than 404), the tick backs
+  off on the same mark: 2, 4, 8, 16, 32, then 60 minutes between reads, instead of every 2 minutes.
+- **A terminal `suspend_pending` does not auto-recover.** When a cancelled estate's machine cannot
+  be stopped (or, behind a record that already says suspended, cannot be read, or reads as stopped
+  with an unreadable config), the estate keeps `suspend_pending`: the gateway refuses it and the
+  tick retries with backoff (2, 4, 8, 16, 32, then 60 min). The 10th failed attempt marks it
+  `failed` (health note "suspend failed ... operator action needed", one `ALERT suspend_failed`
+  log line, `suspend_failed: true` on `/api/health`), then 8 slow retries follow, 6 h apart. After
+  the 18th attempt (about 53 h) `next_retry_at` is null and the tick makes no further call, even
+  if Fly could answer again: the record stays `suspended` + `suspend_pending`, visible and
+  refused, until an operator acts. (A later subscription event for that user also acts on it: a
+  cancel event retries the stop once, and a customer who pays again takes the resume path.)
 - **Reads are strongly consistent** (`consistency: "strong"` on the store: every read goes to
   the origin). With the client's default eventual reads, a registration's own follow-up read
   missed the new user for about 13 s in production (measured 2026-09-14 after the blobs upgrade;

@@ -22,7 +22,7 @@ import {
   type StripeConfig,
   type StripeSubscription,
 } from "./stripe";
-import { getEstate, markResumePending, queueEstate, recordResumeFailure, resumeEstate, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
+import { getEstate, markResumePending, queueEstate, recordResumeFailure, recordReverifyFailure, resumeEstate, reverifyBackoffUntil, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export type WebhookDeps = {
@@ -286,7 +286,7 @@ export async function retryPendingSuspend(
   fly: FlyClient,
   now: Date = new Date(),
   opts: { reverify?: boolean } = {},
-): Promise<{ outcome: "suspended" | "pending" | "cleared" | "resumed" | "resume_failed"; estate: Estate | null }> {
+): Promise<{ outcome: "suspended" | "pending" | "cleared" | "resumed" | "resume_failed" | "backoff"; estate: Estate | null }> {
   const run = async () => {
     const fresh = await getEstate(userId);
     if (!fresh || (!fresh.suspend_pending && !fresh.resume_pending && fresh.status !== "suspended")) return { outcome: "cleared" as const, estate: fresh };
@@ -314,7 +314,17 @@ export async function retryPendingSuspend(
       // A machine-config write may still be applied by Fly after the suspension (configWriteMarks):
       // suspendEstate reads the machine here, inside the lock, and quiets it down again if it is awake (the
       // flag is persisted before the first slow Fly call; a failure leaves it for the normal retries).
-      const r = await suspendEstate(fresh, fly, now, "re-verified: a machine-config write may have landed after the suspension");
+      // A read of the machine that throws (a Fly error other than 404) backs off on the mark instead of
+      // repeating every tick (recordReverifyFailure); the error still surfaces, so the tick counts it.
+      const until = await reverifyBackoffUntil(userId);
+      if (until && until.getTime() > now.getTime()) return { outcome: "backoff" as const, estate: fresh };
+      let r: Estate;
+      try {
+        r = await suspendEstate(fresh, fly, now, "re-verified: a machine-config write may have landed after the suspension");
+      } catch (err) {
+        await recordReverifyFailure(userId, now).catch(() => {});
+        throw err;
+      }
       const stored = (await getEstate(userId)) ?? r;
       const quiet = stored.status === "suspended" && !stored.suspend_pending;
       if (quiet) await settleConfigWrite(userId, now);

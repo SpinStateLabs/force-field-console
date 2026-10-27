@@ -76,8 +76,31 @@ export type CaseResult = {
   events: number;
   lost: number;
   billingAfterCancelMs: number[];
+  /** per cancelled-and-stopped user: from the later of (cancel, last 2xx event delivery[, quiescence start]) to the machine staying stopped */
+  cancelLatency: { sinceDeliveryMs: number; sinceRecoveryMs: number; faultFree: boolean }[];
   trace: string[];
 };
+
+/**
+ * L5, cancel-to-stopped latency (the portal's own retry clock, not Stripe's): once the cancellation has been
+ * delivered (2xx) and, for scenarios with faults or killed invocations, once the faults are gone (the start of
+ * quiescence), the machine must be stopped within one retry interval. The longest interval the code schedules is
+ * the slow retry of a failed suspension (SLOW_RETRY_MS = 6 h, written as a literal so that a change to the
+ * constant is caught here); the margin covers the 2-minute tick cadence, the 5-minute user-lock TTL and the
+ * 2-minute granularity of the quiescence rounds.
+ */
+export const L5_RECOVERY_BOUND_MS = 6 * 3_600_000 + 15 * 60_000;
+/**
+ * L5 for a scenario with no Fly fault, no killed invocation and no short function limit: nothing may delay the
+ * suspension beyond one tick (2 minutes): the webhook stops the machine itself, so the measured latency is 0 (explorer: 58,068
+ * cases, maximum 0 ms), measured from the last 2xx delivery.
+ */
+export const L5_FAULT_FREE_BOUND_MS = 2 * 60_000;
+
+/** True when nothing in the scenario can make a suspension fail or get cut off (see L5_FAULT_FREE_BOUND_MS). */
+export function faultFreeScenario(sc: Scenario): boolean {
+  return sc.actions.every((a) => a.k !== "fault" && a.k !== "pstop" && !("crashAt" in a && a.crashAt !== null) && !(a.k === "deliver" && a.limitMs < 60_000));
+}
 
 let currentNet: Net | null = null;
 let fetchInstalled = false;
@@ -312,6 +335,7 @@ export class World {
       ev.inFlight = this.pending.some((q) => q !== p && q.ev === ev && !q.processed);
       const r = inv.done && !inv.error ? inv.result : null;
       const ok = r && r.status >= 200 && r.status < 300;
+      if (ok) this.lastOkAt[ev.u] = Math.max(this.lastOkAt[ev.u] ?? 0, clock.now);
       this.log(`  -> ${ev.id} ${inv.dead ? "KILLED " + inv.killedBy : inv.error ? "THREW " + String(inv.error?.message ?? inv.error).slice(0, 80) : r.status + " " + JSON.stringify(r.body).slice(0, 140)}`);
       if (ok) {
         if (!ev.delivered && r.body?.duplicate && r.claimAtReply === "processing") {
@@ -477,6 +501,7 @@ export class World {
   }
 
   async quiesce(): Promise<number> {
+    this.quiesceAt = clock.now;
     this.net.faults = NO_FLY_FAULTS();
     this.net.stripeFaults.pTimeout = 0;
     this.log("QUIESCE");
@@ -566,6 +591,13 @@ export class World {
             let from = lastStop.from;
             for (let i = m.history.length - 1; i >= 0 && m.history[i].state === "stopped"; i--) from = m.history[i].from;
             this.billingAfterCancel.push(Math.max(0, from - this.cancelAt[u]!));
+            // L5: measured from the portal's side (see L5_RECOVERY_BOUND_MS / L5_FAULT_FREE_BOUND_MS)
+            const sinceDelivery = Math.max(0, from - Math.max(this.cancelAt[u]!, this.lastOkAt[u] ?? 0));
+            const sinceRecovery = Math.max(0, from - Math.max(this.cancelAt[u]!, this.lastOkAt[u] ?? 0, this.quiesceAt));
+            const faultFree = faultFreeScenario(this.sc);
+            this.cancelLatency.push({ sinceDeliveryMs: sinceDelivery, sinceRecoveryMs: sinceRecovery, faultFree });
+            if (sinceRecovery > L5_RECOVERY_BOUND_MS) this.violate("L5", "cancel-to-stopped-slow", `${state}; stopped ${Math.round(sinceRecovery / 1000)}s after the cancellation was delivered and the faults cleared (bound ${L5_RECOVERY_BOUND_MS / 1000}s)`);
+            if (faultFree && sinceDelivery > L5_FAULT_FREE_BOUND_MS) this.violate("L5", "cancel-to-stopped-slow-fault-free", `${state}; stopped ${Math.round(sinceDelivery / 1000)}s after the cancellation was delivered in a scenario without faults (bound ${L5_FAULT_FREE_BOUND_MS / 1000}s)`);
           }
         }
       }
@@ -578,6 +610,10 @@ export class World {
   }
 
   billingAfterCancel: number[] = [];
+  cancelLatency: CaseResult["cancelLatency"] = [];
+  /** per user: virtual time of the last 2xx answer to one of its events */
+  lastOkAt: number[] = [];
+  quiesceAt = 0;
 }
 
 export async function runCase(sc: Scenario, opts: { trace?: boolean } = {}): Promise<CaseResult> {
@@ -600,6 +636,7 @@ export async function runCase(sc: Scenario, opts: { trace?: boolean } = {}): Pro
     events: w.events.length,
     lost: w.events.filter((e) => e.lostAsDuplicate).length,
     billingAfterCancelMs: w.billingAfterCancel,
+    cancelLatency: w.cancelLatency,
     trace: w.trace,
   };
 }
