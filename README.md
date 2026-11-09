@@ -67,6 +67,7 @@ netlify dev
 | `ESTATE_SECRET_MASTER` | For provisioning | HMAC master; each estate's `FIELD_SHARED_SECRET` is derived from it and the app name, so no per-estate secret is stored. Changing it orphans existing estates. |
 | `FLY_REGION` | No | Region for new estates (default `yyz`). |
 | `FLY_ESTATE_MEMORY_MB` | No | Machine memory (default 2048; the thirteen services need it). |
+| `OPS_CONSOLE_PATH` | No | Relative path of the Ops Console on each estate (e.g. `/console`; letters, digits, `. _ ~ - /` only). When set, a ready estate's dashboard shows "Open Ops Console", opening the estate's own address plus this path in a new tab. Unset: no link. Never proxied; no credentials in the link. |
 | `URL` | Set by Netlify | Used for the Stripe success/cancel/return URLs; falls back to the request origin. |
 
 ## Deploy (Netlify)

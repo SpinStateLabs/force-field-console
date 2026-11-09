@@ -396,6 +396,16 @@ function renderEstate(e, configured) {
     hide(urlWrap);
   }
 
+  // Opens the console at the estate's own address (new tab); the customer unlocks there. Hidden unless the server sent a URL.
+  const opsLink = $("ops-console-link");
+  if (typeof e.ops_console_url === "string" && /^https:\/\//.test(e.ops_console_url)) {
+    opsLink.href = e.ops_console_url;
+    show(opsLink);
+  } else {
+    opsLink.removeAttribute("href");
+    hide(opsLink);
+  }
+
   const notes = {
     ready: "Your estate is armed: per-event ledger signing required, served attestations signed, gateway enforcement with tool checks, and the delegation roster below gates every mint. Requests through /api/v1/* with your API keys reach it.",
     provisioning: "Provisioning runs in the background (a scheduled check restarts it every two minutes if it stalls); typically a few minutes, and every step is shown here.",

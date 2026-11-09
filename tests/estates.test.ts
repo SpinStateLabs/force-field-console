@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { freshStore } from "./helpers";
 import { createUser, type User } from "../src/lib/users";
 import {
@@ -15,6 +17,7 @@ import {
   upgradeEstateImage,
   type Estate,
   newAppName,
+  opsConsoleUrl,
   publicEstate,
   queueEstate,
   resolveRoute,
@@ -579,5 +582,39 @@ describe("dedicated estates", () => {
     expect(cur.health!.note).toMatch(/not the one generated at bootstrap/);
     expect(cur.upgrade_failed_image).toBe("registry.fly.io/force-field-sandbox:v3");
     expect(cur.image).toBe("registry.fly.io/force-field-sandbox:test");
+  });
+});
+
+describe("Open Ops Console link", () => {
+  const ready = { status: "ready", url: "https://est.example.test", suspend_pending: null } as any;
+  const html = readFileSync(join(__dirname, "..", "public", "app.html"), "utf8");
+  const js = readFileSync(join(__dirname, "..", "public", "app.js"), "utf8");
+
+  it("is built from the stored estate url plus the configured path", () => {
+    expect(opsConsoleUrl(ready, "/console")).toBe("https://est.example.test/console");
+    expect(opsConsoleUrl({ ...ready, url: "https://est.example.test/" }, "/a/b")).toBe("https://est.example.test/a/b");
+  });
+  it("is absent when the config is unset, empty or unsafe, or the estate is not ready", () => {
+    for (const p of [undefined, "", "  ", "console", "//evil.test", "/c?token=x", "/c#x", "/../x", "https://x.test/c"]) expect(opsConsoleUrl(ready, p)).toBeNull();
+    expect(opsConsoleUrl({ ...ready, status: "provisioning" }, "/console")).toBeNull();
+    expect(opsConsoleUrl({ ...ready, url: null }, "/console")).toBeNull();
+    expect(opsConsoleUrl({ ...ready, suspend_pending: { reason: "x" } }, "/console")).toBeNull();
+  });
+  it("reaches the dashboard only through OPS_CONSOLE_PATH", () => {
+    const prev = process.env.OPS_CONSOLE_PATH;
+    try {
+      delete process.env.OPS_CONSOLE_PATH;
+      expect((publicEstate({ ...ready, log: [], self_agents: {} } as any) as any).ops_console_url).toBeNull();
+      process.env.OPS_CONSOLE_PATH = "/console";
+      expect((publicEstate({ ...ready, log: [], self_agents: {} } as any) as any).ops_console_url).toBe("https://est.example.test/console");
+    } finally {
+      if (prev === undefined) delete process.env.OPS_CONSOLE_PATH; else process.env.OPS_CONSOLE_PATH = prev;
+    }
+  });
+  it("page: hidden anchor that opens in a new tab, shown only from ops_console_url, nothing hard-coded", () => {
+    expect(html).toMatch(/id="ops-console-link"[^>]*class="[^"]*hidden[^"]*"[^>]*target="_blank"[^>]*rel="noopener noreferrer"|id="ops-console-link"[^>]*target="_blank"/);
+    expect(html).toMatch(/id="ops-console-link"[^>]*href="#"/);
+    expect(js).toContain("e.ops_console_url");
+    expect(js).not.toMatch(/fly\.dev|ops_console_url[^;\n]*\?/);
   });
 });

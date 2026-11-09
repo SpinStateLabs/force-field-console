@@ -1412,6 +1412,20 @@ export function workerActive(e: Estate, now: Date = new Date()): boolean {
   return now.getTime() - new Date(e.updated_at).getTime() < 90_000;
 }
 
+/**
+ * The "Open Ops Console" target: the estate's own stored url plus the path in OPS_CONSOLE_PATH.
+ * Null (link hidden) unless the estate is ready with a url, no suspension is pending, and the
+ * path is a plain relative path (leading "/", no scheme, "//", "?", "#" or whitespace: no query
+ * string, so nothing a credential could ride on). The console is opened at the estate's own
+ * address in a new tab; the portal never proxies it (the gateway buffers, so SSE would not pass).
+ */
+export function opsConsoleUrl(e: Pick<Estate, "status" | "url" | "suspend_pending">, path: string | undefined = env("OPS_CONSOLE_PATH")): string | null {
+  const p = (path ?? "").trim();
+  if (!p || !e.url || e.status !== "ready" || e.suspend_pending) return null;
+  if (!/^\/[A-Za-z0-9._~\/-]*$/.test(p) || p.includes("//") || p.split("/").includes("..")) return null;
+  return e.url.replace(/\/+$/, "") + p;
+}
+
 /** The record as the dashboard sees it: no lease, log capped, nothing secret (there is nothing secret on it). */
 export function publicEstate(e: Estate, now: Date = new Date()): Record<string, unknown> {
   return {
@@ -1424,6 +1438,7 @@ export function publicEstate(e: Estate, now: Date = new Date()): Record<string, 
     attempts: e.attempts,
     error: e.error,
     url: e.url,
+    ops_console_url: opsConsoleUrl(e),
     grantor: e.grantor,
     roster: e.roster,
     fingerprints: e.fingerprints,
