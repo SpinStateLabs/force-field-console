@@ -136,6 +136,35 @@ describe("H1: an active subscription on an unconfigured price keeps the tier and
     expect((await health()).unmatched_price).toBe(true);
   });
 
+  it("C1: past_due -> active on an unknown price does not re-grant, but ALERTs again because the paying customer is left at sandbox", async () => {
+    await payingOperator();
+    const deps = { cfg: stripeConfig()!, fly: null };
+    await handleStripeEvent({ id: "evt_c1a", type: "customer.subscription.updated", created: 100, data: { object: sub({ status: "past_due", ...priced("price_new_annual") }, user.id) } }, deps);
+    expect((await getUserById(user.id))!.tier).toBe("sandbox");
+    expect(errors.filter((l) => l.startsWith("ALERT unmatched_price"))).toHaveLength(1);
+    await handleStripeEvent({ id: "evt_c1b", type: "customer.subscription.updated", created: 200, data: { object: sub(priced("price_new_annual"), user.id) } }, deps);
+    const u = (await getUserById(user.id))!;
+    expect(u.tier).toBe("sandbox"); // an unknown price never grants
+    expect((await getEstate(user.id))!.status).toBe("suspended");
+    const alerts = errors.filter((l) => l.startsWith("ALERT unmatched_price"));
+    expect(alerts).toHaveLength(2);
+    expect(JSON.parse(alerts[1].slice("ALERT unmatched_price".length))).toMatchObject({ status: "active", tier_kept: null });
+    expect((await health()).unmatched_price).toBe(true);
+  });
+
+  it("M2: a paid tier that does not come from this subscription (no billing mirror) is not kept on an unknown price", async () => {
+    user.tier = "operator"; // e.g. granted by an operator, no Stripe subscription behind it
+    user.billing = null;
+    await saveUser(user);
+    await handleStripeEvent(
+      { id: "evt_m2", type: "customer.subscription.created", created: 100, data: { object: sub(priced("price_mystery"), user.id) } },
+      { cfg: stripeConfig()!, fly: null },
+    );
+    const u = (await getUserById(user.id))!;
+    expect(u.tier).toBe("sandbox");
+    expect(u.billing!.price_unmatched).toBe(true);
+  });
+
   it("a new user whose first subscription is on an unknown price stays sandbox (no grant from an unknown price) and is flagged", async () => {
     const r = await handleStripeEvent(
       { id: "evt_d", type: "customer.subscription.created", created: 100, data: { object: sub(priced("price_mystery"), user.id) } },
@@ -286,6 +315,19 @@ describe("H2: provisioning that exhausts its attempts is alerted, flagged and re
     Object.assign(r, { status: "error", attempts: MAX_ATTEMPTS });
     await saveEstate(r);
     expect(await autoRetryFailedEstate((await getEstate(user.id))!, new Date(Date.now() + 365 * 86_400_000))).toBe(false);
+  });
+
+  it("M10: a suspension that became pending in the stored record blocks the auto-retry, even from a copy that predates it", async () => {
+    const e = await exhaust(failingFly(), new Date(Date.now() - 10 * 3_600_000));
+    const stale = structuredClone(e);
+    const stored = (await getEstate(user.id))!;
+    stored.suspend_pending = { reason: "subscription canceled", since: new Date().toISOString(), attempts: 1, last_error: "machine stop failed", next_retry_at: null, failed: false };
+    await (await portalStore()).setJSON("estates/" + user.id, stored);
+    const { autoRetryFailedEstate } = await import("../src/lib/estates");
+    expect(await autoRetryFailedEstate(stale, new Date())).toBe(false);
+    const after = (await getEstate(user.id))!;
+    expect(after.status).toBe("error");
+    expect(after.provision_retry!.count).toBe(0);
   });
 
   it("an errored estate of a user who no longer pays is neither counted nor retried", async () => {

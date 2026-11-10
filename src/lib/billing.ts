@@ -273,7 +273,9 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   const tier: Tier = granting ? paidTier! : keep ?? "sandbox";
   const periodEnd = subscriptionPeriodEnd(sub);
 
-  if (unmatched && !(prior?.price_unmatched && prior.subscription_id === sub.id && prior.price_id === priceId)) {
+  // Deduped per (subscription, price, status, resulting tier): a status change on the same unknown price (e.g. past_due
+  // -> active, which leaves a now-paying customer at sandbox: an unknown price never re-grants) alerts again.
+  if (unmatched && !(prior?.price_unmatched && prior.subscription_id === sub.id && prior.price_id === priceId && prior.status === sub.status && prior.tier === tier)) {
     console.error("ALERT unmatched_price", JSON.stringify({ key: "unmatched_price", user_id: user.id, subscription_id: sub.id, price_id: priceId, status: sub.status, tier_kept: keep }));
   }
 
