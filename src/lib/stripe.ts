@@ -23,25 +23,41 @@ export type PaidTier = Exclude<Tier, "sandbox">;
 export type StripeConfig = {
   secret_key: string;
   webhook_secret: string;
+  /** The Price each tier is SOLD at (Checkout). */
   prices: Record<PaidTier, string>;
+  /**
+   * Further Price ids that also map to the tier (audit H1): older prices kept by existing
+   * subscribers after a price change, other intervals. Optional: STRIPE_PRICE_<TIER>_ACCEPTED,
+   * comma separated. Never used for Checkout.
+   */
+  accepted?: Record<PaidTier, string[]>;
 };
 
-/** The billing configuration, or null when any variable is missing. */
+function priceList(raw: string | undefined): string[] {
+  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+/** The billing configuration, or null when any of the four required variables is missing. */
 export function stripeConfig(): StripeConfig | null {
   const secret_key = env("STRIPE_SECRET_KEY");
   const webhook_secret = env("STRIPE_WEBHOOK_SECRET");
   const operator = env("STRIPE_PRICE_OPERATOR");
   const sovereign = env("STRIPE_PRICE_SOVEREIGN");
   if (!secret_key || !webhook_secret || !operator || !sovereign) return null;
-  return { secret_key, webhook_secret, prices: { operator, sovereign } };
+  const cfg: StripeConfig = { secret_key, webhook_secret, prices: { operator, sovereign } };
+  const accepted = { operator: priceList(env("STRIPE_PRICE_OPERATOR_ACCEPTED")), sovereign: priceList(env("STRIPE_PRICE_SOVEREIGN_ACCEPTED")) };
+  if (accepted.operator.length || accepted.sovereign.length) cfg.accepted = accepted;
+  return cfg;
 }
 
-/** Map a Stripe price id to a paid tier; null for an unknown price. */
+/**
+ * Map a Stripe price id to a paid tier; null for an unknown price. A price id configured for
+ * BOTH tiers (primary or accepted) is ambiguous and maps to no tier: never guess an entitlement.
+ */
 export function tierForPrice(cfg: StripeConfig, priceId: string | null | undefined): PaidTier | null {
   if (!priceId) return null;
-  if (priceId === cfg.prices.operator) return "operator";
-  if (priceId === cfg.prices.sovereign) return "sovereign";
-  return null;
+  const tiers = (["operator", "sovereign"] as const).filter((t) => priceId === cfg.prices[t] || (cfg.accepted?.[t] ?? []).includes(priceId));
+  return tiers.length === 1 ? tiers[0] : null;
 }
 
 export class StripeError extends Error {
@@ -188,6 +204,13 @@ export function subscriptionPeriodEnd(sub: StripeSubscription): number | null {
 
 /** Statuses under which the paid tier is granted (past_due rides Stripe's retry window). */
 export const GRANTING_STATUSES = new Set(["active", "trialing", "past_due"]);
+
+/**
+ * Statuses under which a subscription on an UNKNOWN price keeps the tier the user already has
+ * (audit H1). Narrower than GRANTING_STATUSES on purpose (fail closed): an unknown price never
+ * grants a tier, and past_due on an unknown price is not kept.
+ */
+export const KEEP_ON_UNKNOWN_PRICE_STATUSES = new Set(["active", "trialing"]);
 
 export function parseSignatureHeader(header: string | null): { t: number; v1: string[] } | null {
   if (!header) return null;

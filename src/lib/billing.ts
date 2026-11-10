@@ -13,6 +13,7 @@ import { withUserLock } from "./locks";
 import { getUserById, saveUser, type User, type Tier } from "./users";
 import {
   GRANTING_STATUSES,
+  KEEP_ON_UNKNOWN_PRICE_STATUSES,
   getSubscription,
   listCustomerSubscriptions,
   subscriptionPeriodEnd,
@@ -33,6 +34,49 @@ export type WebhookDeps = {
 };
 
 export type WebhookOutcome = { handled: boolean; note: string };
+
+/** Audit H3: "ops/unmatched_events/<event id>" for each verified event that matched no portal user (an operator clears it). */
+export const UNMATCHED_EVENTS_PREFIX = "ops/unmatched_events/";
+/**
+ * One small record the public health endpoint reads (it never lists or scans): the users whose subscription is on an
+ * unmatched price (audit H1; maintained by the webhook) and the ids of unmatched events (audit H3; an operator
+ * removes them once resolved, together with their ops/unmatched_events/<id> records).
+ */
+export const BILLING_FLAGS_KEY = "ops/billing_flags";
+export type BillingFlags = { unmatched_price_users: string[]; unmatched_events: string[] };
+
+/** Read-modify-write of BILLING_FLAGS_KEY under the store's etag compare-and-set; `mutate` returns false for "no change". */
+export async function updateBillingFlags(mutate: (f: BillingFlags) => boolean): Promise<void> {
+  const store = await portalStore();
+  for (let i = 0; i < 8; i++) {
+    const read = await store.getWithEtag(BILLING_FLAGS_KEY);
+    const f: BillingFlags = { unmatched_price_users: [...(read?.data?.unmatched_price_users ?? [])], unmatched_events: [...(read?.data?.unmatched_events ?? [])] };
+    if (!mutate(f)) return;
+    if (read ? await store.setJSONIfMatch(BILLING_FLAGS_KEY, f, read.etag) : await store.setJSONIfNew(BILLING_FLAGS_KEY, f)) return;
+  }
+  throw new Error("billing flags record kept changing; the event will be redelivered");
+}
+
+/**
+ * Audit H3: a verified subscription/checkout event that matches no portal user is still acknowledged (a retry
+ * would not find the user either), but never silently: one ALERT line (event id, type, subscription id; no email,
+ * no customer id), a create-only record an operator can find, and its id in BILLING_FLAGS_KEY. Persisting is best
+ * effort: a store failure is logged and does not fail the event (the ALERT line has already been written).
+ */
+export async function recordUnmatchedEvent(eventId: string, eventType: string, subscriptionId: string | null, now: Date = new Date()): Promise<void> {
+  console.error("ALERT unmatched_payment", JSON.stringify({ key: "unmatched_payment", event_id: eventId, event_type: eventType, subscription_id: subscriptionId }));
+  try {
+    const store = await portalStore();
+    await store.setJSONIfNew(UNMATCHED_EVENTS_PREFIX + eventId, { event_id: eventId, event_type: eventType, subscription_id: subscriptionId, at: now.toISOString() });
+  } catch (err: any) {
+    console.error("billing: could not persist the unmatched-event record for", eventId, "-", String(err?.message ?? err).slice(0, 200));
+  }
+  try {
+    await updateBillingFlags((f) => (f.unmatched_events.includes(eventId) ? false : (f.unmatched_events.push(eventId), true)));
+  } catch (err: any) {
+    console.error("billing: could not flag the unmatched event", eventId, "for /api/health -", String(err?.message ?? err).slice(0, 200));
+  }
+}
 
 export async function alreadyProcessed(eventId: string): Promise<boolean> {
   const store = await portalStore();
@@ -218,8 +262,32 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   const priceId = subscriptionPriceId(sub);
   const paidTier = tierForPrice(deps.cfg, priceId);
   const granting = paidTier !== null && GRANTING_STATUSES.has(sub.status);
-  const tier: Tier = granting ? paidTier! : "sandbox";
+  // Audit H1: a subscription in a granting status on a price id no tier maps to (a price changed in env, another
+  // interval, a Portal plan switch) is flagged and alerted. If it is the subscription that already gives this user
+  // a paid tier and it is active/trialing, that tier is KEPT and the estate is left alone: a paying customer is never
+  // suspended because of our configuration. An unknown price never GRANTS a tier (fail closed).
+  const unmatched = paidTier === null && GRANTING_STATUSES.has(sub.status);
+  const prior = user.billing;
+  const keep =
+    unmatched && KEEP_ON_UNKNOWN_PRICE_STATUSES.has(sub.status) && user.tier !== "sandbox" && prior?.subscription_id === sub.id ? user.tier : null;
+  const tier: Tier = granting ? paidTier! : keep ?? "sandbox";
   const periodEnd = subscriptionPeriodEnd(sub);
+
+  // Deduped per (subscription, price, status, resulting tier): a status change on the same unknown price (e.g. past_due
+  // -> active, which leaves a now-paying customer at sandbox: an unknown price never re-grants) alerts again.
+  if (unmatched && !(prior?.price_unmatched && prior.subscription_id === sub.id && prior.price_id === priceId && prior.status === sub.status && prior.tier === tier)) {
+    console.error("ALERT unmatched_price", JSON.stringify({ key: "unmatched_price", user_id: user.id, subscription_id: sub.id, price_id: priceId, status: sub.status, tier_kept: keep }));
+  }
+
+  // The flagged user is listed in the one ops/billing_flags record the public health endpoint reads (it never scans).
+  // Written BEFORE the user record: if the user write then fails the event is redelivered and this is redone, so the
+  // record and the mirror's flag cannot drift apart for good.
+  if (unmatched) await updateBillingFlags((f) => (f.unmatched_price_users.includes(user.id) ? false : (f.unmatched_price_users.push(user.id), true)));
+  else if (prior?.price_unmatched) await updateBillingFlags((f) => {
+    const i = f.unmatched_price_users.indexOf(user.id);
+    return i >= 0 ? (f.unmatched_price_users.splice(i, 1), true) : false;
+  });
+  const store = await portalStore();
 
   const carried = { ...(user.billing?.other_subs ?? {}) };
   delete carried[sub.id];
@@ -233,10 +301,12 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     current_period_end: periodEnd ? new Date(periodEnd * 1000).toISOString() : null,
     updated_at: now.toISOString(),
     ...(Object.keys(carried).length ? { other_subs: carried } : {}),
+    ...(unmatched ? { price_unmatched: true as const } : {}),
   };
   await saveUser(user);
-  const store = await portalStore();
   await store.setJSON("stripe_customers/" + sub.customer, { user_id: user.id });
+
+  if (keep) return tier; // the estate stays exactly as it is: nothing queued, resumed or suspended on an unknown price
 
   // Fly calls that stay INLINE in the webhook (Netlify's function limit is unverified; one Fly call was
   // observed at ~20 s, so nothing slow may sit between the event and a persisted decision):
@@ -417,7 +487,10 @@ async function applyOrdered(
   });
 }
 
-/** Dispatch one verified Stripe event. Unknown types and unknown users are acknowledged, not retried. */
+/**
+ * Dispatch one verified Stripe event. Unknown types and unknown users are acknowledged, not retried; an unknown
+ * user on a checkout/subscription event is alerted and recorded (audit H3, recordUnmatchedEvent).
+ */
 export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<WebhookOutcome> {
   const type = String(event?.type ?? "");
   const obj = event?.data?.object ?? {};
@@ -428,7 +501,10 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
     }
     const userId = obj.client_reference_id ?? obj.metadata?.user_id;
     const user = userId ? await getUserById(String(userId)) : null;
-    if (!user) return { handled: false, note: "no portal user on the session" };
+    if (!user) {
+      await recordUnmatchedEvent(String(event?.id ?? ""), type, String(obj.subscription), deps.now ? deps.now() : new Date());
+      return { handled: false, note: "no portal user on the session" };
+    }
     const sub = await getSubscription(deps.cfg, String(obj.subscription), deps.fetchImpl);
     if (!sub.metadata?.user_id) sub.metadata = { ...(sub.metadata ?? {}), user_id: user.id };
     const r = await applyOrdered(user, sub, event, deps, true);
@@ -440,7 +516,10 @@ export async function handleStripeEvent(event: any, deps: WebhookDeps): Promise<
     const sub = obj as StripeSubscription;
     if (!sub?.id || !sub?.customer) return { handled: false, note: "subscription event without id/customer" };
     const user = await userForSubscription(sub, deps);
-    if (!user) return { handled: false, note: "no portal user for the subscription" };
+    if (!user) {
+      await recordUnmatchedEvent(String(event?.id ?? ""), type, String(sub.id), deps.now ? deps.now() : new Date());
+      return { handled: false, note: "no portal user for the subscription" };
+    }
     const r = await applyOrdered(user, sub, event, deps);
     if (!r.applied) return { handled: false, note: r.reason === "other_subscription" ? `${type} for ${sub.id} ignored (not the user's current subscription)` : `stale ${type} for ${sub.id} ignored (out of order)` };
     return { handled: true, note: `${type}; status ${r.status ?? sub.status}; tier ${r.tier}` };

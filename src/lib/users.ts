@@ -29,6 +29,8 @@ export type Billing = {
   updated_at: string;
   /** Other granting subscriptions of this customer seen while another one was current (adopted when the current one ends). */
   other_subs?: Record<string, { status: string; price_id: string | null }>;
+  /** Audit H1: the subscription is in a granting status on a price id that maps to no configured tier. */
+  price_unmatched?: true;
 };
 
 export type User = {

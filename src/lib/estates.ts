@@ -97,6 +97,11 @@ export type Estate = {
    */
   suspend_pending?: SuspendPending | null;
   resume_pending?: ResumePending | null;
+  /**
+   * Audit H2: automatic retries of a provisioning that exhausted MAX_ATTEMPTS. `count` retries done so far;
+   * `next_retry_at` when the tick may retry it next (null: no automatic retry left or pending).
+   */
+  provision_retry?: ProvisionRetry | null;
   lease_until: string | null;
   worker_until: string | null;
   created_at: string;
@@ -113,6 +118,11 @@ export const SELF_AGENTS: { id: string; step: EstateStep; secret: string }[] = [
   { id: "compliance-crosswalk", step: "provision_crosswalk", secret: "FIELD_CROSSWALK_SELF_TOKEN" },
 ];
 export const MAX_ATTEMPTS = 6;
+export type ProvisionRetry = { count: number; next_retry_at: string | null };
+/** Audit H2: a provisioning that failed MAX_ATTEMPTS times is retried by the tick at most this many times... */
+export const MAX_AUTO_PROVISION_RETRIES = 3;
+/** ...after a backoff of PROVISION_RETRY_BASE_MS * 2^count (1 h, 2 h, 4 h); then only the dashboard or an operator retries. */
+export const PROVISION_RETRY_BASE_MS = 60 * 60_000;
 export const MAX_POLLS = 90;
 export const LEASE_MS = 25000;
 export const MAX_LOG = 60;
@@ -655,7 +665,19 @@ export async function advanceEstate(
     logEstate(e, step, `attempt ${e.attempts} failed: ${e.error}`, now);
     if (e.attempts >= MAX_ATTEMPTS) {
       e.status = "error";
-      logEstate(e, step, "giving up; retry from the dashboard once the cause is fixed", now);
+      // Audit H2: never silent. One ALERT per transition to error (no email), and a bounded automatic retry.
+      const count = e.provision_retry?.count ?? 0;
+      const next = count < MAX_AUTO_PROVISION_RETRIES ? new Date(now.getTime() + PROVISION_RETRY_BASE_MS * 2 ** count) : null;
+      e.provision_retry = { count, next_retry_at: next ? next.toISOString() : null };
+      console.error("ALERT provision_failed", JSON.stringify({ key: "provision_failed", user_id: e.user_id, app: e.app, step, attempts: e.attempts, auto_retries_done: count, next_auto_retry_at: e.provision_retry.next_retry_at }));
+      logEstate(
+        e,
+        step,
+        next
+          ? `giving up for now; automatic retry ${count + 1} of ${MAX_AUTO_PROVISION_RETRIES} after ${next.toISOString()}, or retry from the dashboard once the cause is fixed`
+          : "giving up; automatic retries exhausted - retry from the dashboard once the cause is fixed",
+        now,
+      );
     }
     e.lease_until = null;
     await saveEstate(e, now);
@@ -675,9 +697,36 @@ export async function retryEstate(e: Estate, now: Date = new Date()): Promise<Es
   e.attempts = 0;
   e.polls = 0;
   e.error = null;
+  // A manual retry supersedes a pending automatic one; the count of automatic retries already done is kept.
+  if (e.provision_retry) e.provision_retry = { count: e.provision_retry.count, next_retry_at: null };
   logEstate(e, e.step, "retry requested", now);
   await saveEstate(e, now);
   return e;
+}
+
+/** Audit H2: an estate whose provisioning exhausted MAX_ATTEMPTS and whose automatic retry is due. */
+export function provisionRetryDue(e: Estate, now: Date): boolean {
+  const at = e.status === "error" && e.attempts >= MAX_ATTEMPTS ? e.provision_retry?.next_retry_at : null;
+  return Boolean(at) && new Date(at!).getTime() <= now.getTime();
+}
+
+/**
+ * Audit H2: the tick's automatic retry of a failed provisioning (the caller checks the user still pays).
+ * Only an error that came from exhausting the provisioning attempts is retried (never a missing app or machine,
+ * which needs an operator). Conditional on the STORED record still being that same failure with that same due
+ * retry, so a stale copy or a second driver cannot retry twice. True when the estate went back to provisioning.
+ */
+export async function autoRetryFailedEstate(e: Estate, now: Date = new Date()): Promise<boolean> {
+  if (!provisionRetryDue(e, now)) return false;
+  const due = e.provision_retry!.next_retry_at;
+  const count = e.provision_retry!.count + 1;
+  const next: Estate = { ...e, log: [...e.log], status: "provisioning", attempts: 0, polls: 0, error: null, lease_until: null, provision_retry: { count, next_retry_at: null } };
+  logEstate(next, next.step, `automatic retry ${count} of ${MAX_AUTO_PROVISION_RETRIES} after the provisioning failed`, now);
+  const ok = await saveEstate(next, now, {
+    onlyIf: (cur) => cur.status === "error" && !cur.suspend_pending && cur.attempts >= MAX_ATTEMPTS && cur.provision_retry?.next_retry_at === due,
+  });
+  if (ok) Object.assign(e, next);
+  return ok;
 }
 
 export const MAX_SUSPEND_RETRIES = 10;
