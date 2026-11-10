@@ -8,7 +8,7 @@
 // production deploy (never in previews). Logs counts only.
 import type { Config } from "@netlify/functions";
 import { flyClientOrNull, flyConfig } from "../../src/lib/fly";
-import { advanceEstate, checkEstateHealth, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
+import { advanceEstate, autoRetryFailedEstate, checkEstateHealth, provisionRetryDue, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
 import { userLockAgeMs } from "../../src/lib/locks";
 import { getUserById } from "../../src/lib/users";
 import { isGrantingUser, retryPendingSuspend } from "../../src/lib/billing";
@@ -118,9 +118,26 @@ export default async (_req: Request): Promise<Response> => {
     }
   }
 
+  // Audit H2: a PAYING customer's estate in error is counted for /api/health (provision_failed), and one whose
+  // provisioning exhausted its attempts is put back to provisioning when its bounded automatic retry is due
+  // (autoRetryFailedEstate; the next tick or worker drives it). An errored estate of a user who no longer pays is
+  // neither counted nor retried. A missing app / machine is counted but never auto-retried (operator action).
+  let provisionFailed = 0;
+  for (const e of estates) {
+    if (e.status !== "error") continue;
+    try {
+      if (!isGrantingUser(await getUserById(e.user_id))) continue;
+      provisionFailed += 1;
+      if (provisionRetryDue(e, now) && Date.now() - started <= BUDGET_MS && (await autoRetryFailedEstate(e, now))) bump("provision_auto_retry");
+    } catch (err: any) {
+      bump("provision_auto_retry_threw");
+      console.error("estate-tick: provisioning auto-retry threw for an estate:", String(err?.message ?? err).slice(0, 200));
+    }
+  }
+
   // One tiny counter record for the public health endpoint, so it never scans the estates itself.
   try {
-    await (await portalStore()).setJSON("ops/suspend_failed", { count: failedSuspends, resume_failed: failedResumes, machine_stopped: machineStopped, at: now.toISOString() });
+    await (await portalStore()).setJSON("ops/suspend_failed", { count: failedSuspends, resume_failed: failedResumes, machine_stopped: machineStopped, provision_failed: provisionFailed, at: now.toISOString() });
   } catch (err: any) {
     console.error("estate-tick: could not write the suspend-failed counter:", String(err?.message ?? err).slice(0, 200));
   }
@@ -168,7 +185,7 @@ export default async (_req: Request): Promise<Response> => {
   }
 
   console.log(`estate-tick: suspend-pending ${stuckSuspends.length}, pending ${pending.length}, renewals due ${due.length}, ready ${ready.length}, drifted ${drifted.length}, outcomes ${JSON.stringify(outcomes)}`);
-  return new Response(JSON.stringify({ ok: true, suspend_pending: stuckSuspends.length, suspend_failed: failedSuspends, resume_failed: failedResumes, machine_stopped: machineStopped, pending: pending.length, renewals_due: due.length, ready: ready.length, drifted: drifted.length, outcomes }), { status: 200 });
+  return new Response(JSON.stringify({ ok: true, suspend_pending: stuckSuspends.length, suspend_failed: failedSuspends, resume_failed: failedResumes, machine_stopped: machineStopped, provision_failed: provisionFailed, pending: pending.length, renewals_due: due.length, ready: ready.length, drifted: drifted.length, outcomes }), { status: 200 });
 };
 
 export const config: Config = {

@@ -61,6 +61,7 @@ netlify dev
 | `STRIPE_WEBHOOK_SECRET` | For billing | Signing secret of the `/api/billing/webhook` endpoint (`whsec_…`). |
 | `STRIPE_PRICE_OPERATOR` | For billing | Stripe Price id billed for Operator. |
 | `STRIPE_PRICE_SOVEREIGN` | For billing | Stripe Price id billed for Sovereign. |
+| `STRIPE_PRICE_OPERATOR_ACCEPTED` / `STRIPE_PRICE_SOVEREIGN_ACCEPTED` | No | Further Price ids (comma separated) that map to the tier, e.g. the old Price after a price change or another interval. Never used for Checkout. An id listed for both tiers maps to neither. |
 | `FLY_API_TOKEN` | For provisioning | Org-scoped Fly token (apps, volumes, machines, IPs, secrets). Provisioning is configured only when this, `FLY_ORG_SLUG`, `FLY_ESTATE_IMAGE` and `ESTATE_SECRET_MASTER` are all set. |
 | `FLY_ORG_SLUG` | For provisioning | The Fly organization that owns customer estates. |
 | `FLY_ESTATE_IMAGE` | For provisioning | The estate image to launch, e.g. `registry.fly.io/force-field-sandbox:<label>` — a label that was smoked and deployed on the sandbox first. Changing it (and redeploying) starts the rollout to existing estates, one per tick. |
@@ -118,6 +119,10 @@ The gateway forwards method, body, `content-type`, `accept`, and the caller's `x
 and never forwards client cookies, `Authorization` or `x-api-key`. A provisioning estate answers `503 estate_provisioning`, a
 suspended one `403 estate_suspended`, a failed one `503 estate_error` — never a silent fall
 back to the sandbox, which would mix a tenant's data.
+A paying customer's provisioning that fails `MAX_ATTEMPTS` (6) times logs one `ALERT provision_failed`
+line, `/api/health` shows `provision_failed: true` (counted by the tick for paying users only), and the
+tick retries it automatically up to 3 times, 1 h / 2 h / 4 h after each failure (audit H2). After that only
+the dashboard retry or an operator moves it; a missing app or machine is flagged but never auto-retried.
 
 ## Billing (Stripe)
 
@@ -136,6 +141,18 @@ back to the sandbox, which would mix a tenant's data.
 - Stored per user: Stripe customer id, subscription id, status, price id, period end. Never
   card data.
 - Unconfigured: every billing endpoint answers `501 billing_not_configured`.
+- Unknown price (audit H1): an `active`/`trialing` subscription whose Price maps to no tier keeps
+  the tier the user already has from that subscription (the estate is not suspended), the mirror
+  records `price_unmatched`, one `ALERT unmatched_price` log line is written and `/api/health`
+  shows `unmatched_price: true` until a later event puts it on a configured Price. An unknown
+  Price never grants a tier; `past_due` or ended subscriptions on it drop to sandbox. Owner action:
+  restrict the Customer Portal's product catalogue to the configured Prices.
+- Unmatched user (audit H3): a `checkout.session.completed` or `customer.subscription.*` event
+  that matches no portal user is still acknowledged `200`, but logs `ALERT unmatched_payment`
+  (event id, type, subscription id; no email or customer id), is recorded under
+  `ops/unmatched_events/<event id>` and listed in `ops/billing_flags`; `/api/health` shows
+  `unmatched_events: true` until an operator, after resolving it, removes the id from
+  `ops/billing_flags`. Health reads that one record only (no listing).
 
 ## Dedicated estates (Fly.io)
 
