@@ -74,7 +74,7 @@ export async function releaseSuspendedEstate(userId: string, fly: FlyClient | nu
     // A driver that read the record before it was suspended may still be inside a Fly call (create app,
     // create machine): its call could land AFTER Fly answered "no app" below and leave an app without a
     // record. Two independent refusals: a background worker's lease that has not ended (it clears the lease
-    // when it exits; a killed worker's lease ends within about 16 minutes), and a record written moments ago
+    // when it exits; a killed worker's lease ends within about 13 minutes: WORKER_BUDGET_MS 12 min + 1 min, worker.ts), and a record written moments ago
     // (the suspension itself, or any driver finishing its step; covers the drivers that hold no worker lease).
     if (e.worker_until && !(new Date(e.worker_until).getTime() <= now.getTime())) {
       throw new EstateError(409, "worker_active", "A background worker may still be working on this estate; nothing was released. Try again in a few minutes.");
@@ -107,6 +107,20 @@ export async function releaseSuspendedEstate(userId: string, fly: FlyClient | nu
       if (found) {
         throw new EstateError(409, "fly_app_exists", "The Fly app behind this estate still exists (its data is kept there); it cannot be released. Reactivate billing to resume it, or ask Spin State Labs to remove it.");
       }
+    }
+    // Positive control (follow-up of PR 16): Fly answers 404 to GET /apps/<name> also when the token cannot see the
+    // app's organization, so "no app" is accepted only when the organization's full app list can be read and does not
+    // name the app either. A list that cannot be read, or is partial, refuses: nothing is released.
+    let names: string[];
+    try {
+      names = await fly.listAppNames(RELEASE_FLY_TIMEOUT_MS);
+    } catch (err: any) {
+      console.error("estate release: Fly app list could not be read -", err instanceof FlyError ? `HTTP ${err.status}` : String(err?.message ?? err).slice(0, 200));
+      throw new EstateError(502, "fly_check_failed", "Fly could not confirm that the estate's app is gone; nothing was released. Try again shortly.");
+    }
+    if (apps.some((a) => names.includes(a))) {
+      console.error("estate release: GET app answered 404 but the organization's app list names it; refused");
+      throw new EstateError(409, "fly_app_exists", "The Fly app behind this estate still exists (its data is kept there); it cannot be released. Reactivate billing to resume it, or ask Spin State Labs to remove it.");
     }
 
     // The record must still be exactly the one checked above (a writer outside the lock may have saved meanwhile).

@@ -42,6 +42,16 @@ function fakeFly(apps: Record<string, unknown> = {}) {
       if (v instanceof Error) throw v;
       return v ?? null;
     },
+    /** The org's app list (positive control): every app given a truthy value; `listError` throws; `listExtra` adds names. */
+    listError: null as null | Error,
+    listExtra: [] as string[],
+    listed: 0,
+    async listAppNames(timeoutMs?: number) {
+      fly.listed += 1;
+      timeouts.push(timeoutMs);
+      if (fly.listError) throw fly.listError;
+      return [...Object.keys(apps).filter((k) => apps[k] && !(apps[k] instanceof Error)), ...fly.listExtra];
+    },
   };
   return fly;
 }
@@ -100,7 +110,8 @@ describe("releaseSuspendedEstate: success", () => {
     expect(r).toEqual({ released: true, app: e.app, audit_key: releasedEstateKey(user.id, e.created_at), released_at: NOW.toISOString() });
     expect(await getEstate(user.id)).toBeNull();
     expect(fly.asked).toEqual([e.app]); // Fly was asked, about this estate's app
-    expect(fly.timeouts).toEqual([RELEASE_FLY_TIMEOUT_MS]); // with the short timeout: the user lock is held meanwhile
+    expect(fly.timeouts).toEqual([RELEASE_FLY_TIMEOUT_MS, RELEASE_FLY_TIMEOUT_MS]); // GET app + the org list, both with the short timeout: the user lock is held meanwhile
+    expect(fly.listed).toBe(1); // the positive control was asked once
     expect(e.app).toBe(newAppName(user.id));
 
     const audit = await store.get(r.audit_key);
@@ -244,8 +255,45 @@ describe("releaseSuspendedEstate: refusals change nothing", () => {
     const fly = fakeFly({ [e.app]: { name: e.app } });
     expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([409, "fly_app_exists"]);
     expect(fly.asked).toEqual([e.app]);
+    expect(fly.listed).toBe(0); // an app found by GET needs no list: the list comes after the GET loop
     await expectUntouched(e);
   });
+
+  it("409 when the record names another app and only the DERIVED name is in the org list (GET 404 for both)", async () => {
+    const e = await suspendedEstate({ app: "ff-est-0ddba11c" });
+    const fly = fakeFly();
+    fly.listExtra = [newAppName(user.id)];
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([409, "fly_app_exists"]);
+    expect(fly.asked).toEqual(["ff-est-0ddba11c", newAppName(user.id)]);
+    expect(fly.listed).toBe(1);
+    await expectUntouched(e);
+  });
+
+  it("409 when GET app answers 404 but the organization's app list names the app (positive control)", async () => {
+    const e = await suspendedEstate();
+    const fly = fakeFly();
+    fly.listExtra = [e.app];
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([409, "fly_app_exists"]);
+    expect(fly.listed).toBe(1);
+    await expectUntouched(e);
+  });
+
+  for (const [what, error] of [
+    ["answers 403 (the token cannot read the org)", new FlyError(403, "Fly GET /apps?org_slug=personal answered HTTP 403")],
+    ["answers a partial list", new FlyError(200, "Fly list apps answered a body that is not a complete app list")],
+    ["throws anything else", new Error("boom")],
+  ] as const) {
+    it(`502 when the org app list ${what}: no positive control, nothing released`, async () => {
+      const e = await suspendedEstate();
+      const fly = fakeFly();
+      fly.listError = error;
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([502, "fly_check_failed"]);
+      await expectUntouched(e);
+    });
+  }
 
   it("409 when the record names another app but the derived app exists", async () => {
     const e = await suspendedEstate({ app: "ff-est-0ddba11c" });
@@ -430,6 +478,7 @@ describe("POST /api/estate/release and the gateway route afterwards", () => {
     vi.stubGlobal("fetch", async (input: any, init?: any) => {
       const url = typeof input === "string" ? input : input.url;
       seen.push({ url, headers: new Headers(init?.headers) });
+      if (url.startsWith("https://api.machines.dev/v1/apps?org_slug=")) return new Response(JSON.stringify({ total_apps: 1, apps: [{ name: "force-field-sandbox" }] }), { status: 200 });
       if (url.startsWith("https://api.machines.dev/")) return new Response(flyStatus === 200 ? JSON.stringify({ name: "x" }) : "{}", { status: flyStatus });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     });
@@ -490,7 +539,7 @@ describe("POST /api/estate/release and the gateway route afterwards", () => {
     const res = await post(cookie);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ released: true, estate: null, route: "sandbox" });
-    expect(seen.map((s) => s.url)).toEqual([`https://api.machines.dev/v1/apps/${e.app}`]);
+    expect(seen.map((s) => s.url)).toEqual([`https://api.machines.dev/v1/apps/${e.app}`, `https://api.machines.dev/v1/apps?org_slug=${process.env.FLY_ORG_SLUG}`]); // GET app, then the org list (positive control)
 
     const status = await estateHandler(new Request("http://portal.test/api/estate", { headers: { cookie } }), ctx);
     expect((await status.json()).estate).toBeNull();

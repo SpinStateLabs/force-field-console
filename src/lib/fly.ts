@@ -154,6 +154,24 @@ export class FlyClient {
     return r.body;
   }
 
+  /**
+   * Names of every app in the configured organization (Machines API `GET /v1/apps?org_slug=`). The answer is
+   * `{ total_apps, apps: [{ name, ... }] }` (MEASURED 2026-11-12 with 15 apps; an org the token cannot see answers
+   * 404 "organization not found", MEASURED with an unknown slug). Pagination: none documented and none seen; the
+   * `total_apps` check only catches a list shorter than its own count. Fails closed: any non-2xx, a body of another
+   * shape, `total_apps` different from the number returned, or an EMPTY list (the org holds at least the app being
+   * asked about's neighbours; an empty answer is never taken as proof) throws FlyError. Used by the estate release as
+   * the positive control of a 404 from getApp (a token that cannot see the org also gets a 404 there).
+   */
+  async listAppNames(timeoutMs = 20000): Promise<string[]> {
+    const body = await this.restOk("GET", `/apps?org_slug=${encodeURIComponent(this.cfg.org)}`, undefined, timeoutMs);
+    const apps = body?.apps;
+    if (!Array.isArray(apps) || apps.length === 0 || !apps.every((a: any) => a && typeof a.name === "string") || body?.total_apps !== apps.length) {
+      throw new FlyError(200, "Fly list apps answered a body that is not a complete app list", null);
+    }
+    return apps.map((a: any) => a.name as string);
+  }
+
   /** Create the app; an already-existing app of that name is treated as success. */
   async createApp(name: string): Promise<void> {
     const r = await this.rest("POST", "/apps", { app_name: name, org_slug: this.cfg.org });
