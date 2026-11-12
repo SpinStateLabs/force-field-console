@@ -14,7 +14,7 @@ import { stripeConfig } from "../src/lib/stripe";
 import { handleStripeEvent, retryPendingSuspend } from "../src/lib/billing";
 import { FlyError } from "../src/lib/fly";
 import { EstateError, estateKey, estateSecret, getEstate, newAppName, queueEstate, releasedEstateKey, saveEstate, type Estate } from "../src/lib/estates";
-import { billingBlocksRelease, releaseSuspendedEstate } from "../src/lib/release";
+import { RELEASE_FLY_TIMEOUT_MS, RELEASE_QUIET_MS, billingBlocksRelease, releaseSuspendedEstate } from "../src/lib/release";
 
 const ctx = {} as any;
 const STRIPE_ENV = { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_OPERATOR: "price_op", STRIPE_PRICE_SOVEREIGN: "price_sov" };
@@ -29,11 +29,14 @@ let user: User;
 /** Fly stand-in for the one question the release asks: does this app exist? `apps[name]` may be an Error to throw. */
 function fakeFly(apps: Record<string, unknown> = {}) {
   const asked: string[] = [];
+  const timeouts: unknown[] = [];
   const fly = {
     asked,
+    timeouts,
     hook: null as null | (() => Promise<void>),
-    async getApp(name: string) {
+    async getApp(name: string, timeoutMs?: number) {
       asked.push(name);
+      timeouts.push(timeoutMs);
       if (fly.hook) await fly.hook();
       const v = apps[name];
       if (v instanceof Error) throw v;
@@ -97,6 +100,7 @@ describe("releaseSuspendedEstate: success", () => {
     expect(r).toEqual({ released: true, app: e.app, audit_key: releasedEstateKey(user.id, e.created_at), released_at: NOW.toISOString() });
     expect(await getEstate(user.id)).toBeNull();
     expect(fly.asked).toEqual([e.app]); // Fly was asked, about this estate's app
+    expect(fly.timeouts).toEqual([RELEASE_FLY_TIMEOUT_MS]); // with the short timeout: the user lock is held meanwhile
     expect(e.app).toBe(newAppName(user.id));
 
     const audit = await store.get(r.audit_key);
@@ -118,6 +122,12 @@ describe("releaseSuspendedEstate: success", () => {
   it("releases an account that never had a billing record", async () => {
     await setBilling(null);
     await suspendedEstate();
+    await releaseSuspendedEstate(user.id, fakeFly() as any, NOW);
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("releases once the worker lease has ended and the record has been quiet for RELEASE_QUIET_MS exactly", async () => {
+    await suspendedEstate({ worker_until: NOW.toISOString(), updated_at: new Date(NOW.getTime() - RELEASE_QUIET_MS).toISOString() });
     await releaseSuspendedEstate(user.id, fakeFly() as any, NOW);
     expect(await getEstate(user.id)).toBeNull();
   });
@@ -158,6 +168,34 @@ describe("releaseSuspendedEstate: refusals change nothing", () => {
   it("409 while a resume is pending (a paying customer's machine is about to start)", async () => {
     const e = await suspendedEstate({ resume_pending: { since: "t", attempts: 0, last_error: "", next_retry_at: null, failed: false } });
     expect(await refusal(releaseSuspendedEstate(user.id, fakeFly() as any, NOW))).toEqual([409, "resume_pending"]);
+    await expectUntouched(e);
+  });
+
+  it("409 while a background worker's lease has not ended (its Fly call may still land), without asking Fly", async () => {
+    const e = await suspendedEstate({ worker_until: new Date(NOW.getTime() + 1).toISOString() });
+    const fly = fakeFly();
+    expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([409, "worker_active"]);
+    expect(fly.asked).toEqual([]);
+    await expectUntouched(e);
+  });
+
+  it("409 while the record was written less than RELEASE_QUIET_MS ago (a driver may be mid-step), without asking Fly", async () => {
+    for (const updated_at of [new Date(NOW.getTime() - RELEASE_QUIET_MS + 1).toISOString(), new Date(NOW.getTime() + 60_000).toISOString(), "not a date"]) {
+      const e = await suspendedEstate({ updated_at });
+      const fly = fakeFly();
+      expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([409, "estate_settling"]);
+      expect(fly.asked).toEqual([]);
+      await expectUntouched(e);
+      await store.delete(estateKey(user.id));
+    }
+  });
+
+  it("404 when the account record cannot be read: billing unknown is a refusal", async () => {
+    const e = await suspendedEstate();
+    await store.delete("uid/" + user.id);
+    const fly = fakeFly();
+    expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([404, "no_user"]);
+    expect(fly.asked).toEqual([]);
     await expectUntouched(e);
   });
 
@@ -291,11 +329,37 @@ describe("a released record cannot come back from a stale copy", () => {
     expect((await getEstate(user.id))!.step).toBe("allocate_ips");
   });
 
+  it("a copy of the released record cannot overwrite the NEW record queued after it", async () => {
+    const stale = await suspendedEstate();
+    await releaseSuspendedEstate(user.id, fakeFly() as any, NOW);
+    const fresh = await queueEstate(user, new Date("2026-12-01T00:00:00.000Z"));
+    expect(await refusal(saveEstate(stale))).toEqual([409, "estate_replaced"]);
+    expect(await refusal(saveEstate(stale, NOW, { owns: ["health"] }))).toEqual([409, "estate_replaced"]);
+    const stored = (await getEstate(user.id))!;
+    expect([stored.created_at, stored.status, stored.machine_id]).toEqual([fresh.created_at, "provisioning", null]);
+  });
+
+  it("the audit copy is written BEFORE the delete: a delete that fails leaves the record and its audit copy", async () => {
+    const e = await suspendedEstate();
+    const realDelete = store.delete.bind(store);
+    store.delete = async (key: string) => {
+      if (key === estateKey(user.id)) throw new Error("blob store down");
+      return realDelete(key);
+    };
+    await expect(releaseSuspendedEstate(user.id, fakeFly() as any, NOW)).rejects.toThrow("blob store down");
+    store.delete = realDelete;
+    expect(await getEstate(user.id)).toEqual(e); // still suspended, still refused by the gateway
+    expect((await store.get(releasedEstateKey(user.id, e.created_at))).estate).toEqual(e);
+    expect(await store.get(markKey())).not.toBeNull();
+    await releaseSuspendedEstate(user.id, fakeFly() as any, NOW); // repeatable
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
   it("an audit copy left by an interrupted release does not block the record that still exists", async () => {
     const e = await suspendedEstate();
     await store.setJSON(releasedEstateKey(user.id, e.created_at), { released_at: "t", estate: e }); // written, then the delete never happened
     e.roster = { allowed_scope: ["a.b"], max_ttl_days: 7, max_spend_usd: null };
-    expect(await saveEstate(e)).toBe(true);
+    expect(await saveEstate(e, QUEUED_AT)).toBe(true);
     await releaseSuspendedEstate(user.id, fakeFly() as any, NOW); // and the release can simply be repeated
     expect(await getEstate(user.id)).toBeNull();
     expect((await store.get(releasedEstateKey(user.id, e.created_at))).estate.roster.allowed_scope).toEqual(["a.b"]);

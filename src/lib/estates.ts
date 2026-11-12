@@ -184,6 +184,11 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
   for (let attempt = 0; attempt < 8; attempt++) {
     const read = await store.getWithEtag(key);
     const cur = read?.data as Estate | undefined;
+    // The stored record is a DIFFERENT estate from the caller's copy: the caller's was released and a new one
+    // was queued since (a record keeps its created_at for life). An old copy must never overwrite the new record.
+    if (cur && cur.created_at !== e.created_at) {
+      throw new EstateError(409, "estate_replaced", "This estate record was replaced by a newer one; nothing was written.");
+    }
     // A write conditional on the STORED record (e.g. "the suspension is still pending"): skipped, not forced.
     if (cur && opts.onlyIf && !opts.onlyIf(cur)) return false;
     let out: Estate = e;

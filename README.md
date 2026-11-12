@@ -213,7 +213,9 @@ fingerprint must equal the one generated at bootstrap) → `ready`.
   estate_suspended`) for as long as its record exists. The signed-in owner can release their own
   suspended estate from the dashboard (`POST /api/estate/release` with `{"confirm":"release"}`; the
   target is always the session's account). It is refused, and nothing changes, unless all of these
-  hold under the per-user lock: the record is `suspended` with no suspension and no resume pending;
+  hold under the per-user lock: the record is `suspended` with no suspension and no resume pending,
+  no background worker's lease still running and no write in the last 2 minutes (a provisioning
+  call that was in flight when the suspension landed may still create something on Fly);
   billing does not grant (sandbox tier, no subscription in a granting status, no other granting
   subscription remembered); and Fly, asked at that moment, has no app for the estate (Fly not
   configured or not answering is a refusal: `501` / `502`). A release writes an audit copy of the
@@ -221,8 +223,10 @@ fingerprint must equal the one generated at bootstrap) → `ready`.
   `estates/<user id>`, drops the account's config-write mark and logs `estate released`. The
   account's keys then reach the shared sandbox again. The dedicated estate's data is not carried
   over. The audit copy is also a tombstone: a stale copy of the released record can never re-create
-  it (`409 estate_released`); a later granting subscription queues a new record and provisions a
-  fresh estate.
+  it (`409 estate_released`) nor overwrite a record queued after it (`409 estate_replaced`); a
+  later granting subscription queues a new record and provisions a fresh estate. Suspension keeps
+  the Fly app, so in practice a release succeeds only after an operator has removed the app (or
+  when none was ever created); until then the control answers `409 fly_app_exists`.
 - Customer-facing usage (register an agent, mint a token, a governed LLM call, an attestation
   pack, off-box verification): [docs/estate-quickstart.md](docs/estate-quickstart.md).
 - Unconfigured: estate mutations answer `501 provisioning_not_configured`; a paid account is

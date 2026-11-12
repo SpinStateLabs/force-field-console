@@ -4,7 +4,8 @@
 // billing comes back. When it never will, the OWNER may release the record: the account then has no estate
 // record and its keys route to the shared sandbox again. Nothing on Fly is touched here, and nothing is
 // released unless ALL of these hold, checked under the per-user lock the Stripe webhook and the tick take:
-//   1. the stored record is `suspended`, with no suspension and no resume pending;
+//   1. the stored record is `suspended`, with no suspension and no resume pending, no background worker's
+//      lease still running, and no write in the last RELEASE_QUIET_MS;
 //   2. the account's billing does not grant (sandbox tier, no granting subscription, none remembered);
 //   3. Fly was asked and has NO app for this estate (a failed or impossible ask is a refusal, never a guess).
 // The dedicated estate's data is not carried over to the sandbox. A later granting subscription queues a
@@ -18,7 +19,11 @@
 //   - Writers that hold a copy read earlier and do not take the lock (a worker, the tick's own list, a
 //     dashboard request): the record is deleted only if it is byte-for-byte the one that was checked (etag
 //     re-read right before the delete; Blobs has no conditional delete, so the window is read-to-delete), and
-//     saveEstate refuses to re-create a released record from such a copy (the audit copy is its tombstone).
+//     saveEstate refuses to re-create a released record from such a copy (the audit copy is its tombstone)
+//     and refuses to overwrite a record queued later with a copy of an earlier one (created_at differs).
+//   - A driver still inside a Fly call that creates something (it read the record before the suspension):
+//     refused while a worker lease runs or the record was written within RELEASE_QUIET_MS; once its call has
+//     landed, Fly has the app and the release is refused for that.
 
 import { EstateError, clearConfigWrite, estateKey, newAppName, releasedEstateKey, type Estate } from "./estates";
 import { FlyError, type FlyClient } from "./fly";
@@ -29,6 +34,11 @@ import { getUserById, type User } from "./users";
 
 /** How long one "does this app exist" question to Fly may take (the release holds the user lock meanwhile). */
 export const RELEASE_FLY_TIMEOUT_MS = 8000;
+/**
+ * A record must have been untouched for this long before it can be released. An assumption, sized above
+ * several Fly calls of 20 s each (the client's timeout); how late Fly can apply an abandoned call is not known.
+ */
+export const RELEASE_QUIET_MS = 2 * 60_000;
 
 /** Why this account's billing forbids a release, or null when it does not grant anything. */
 export function billingBlocksRelease(u: User): string | null {
@@ -60,6 +70,17 @@ export async function releaseSuspendedEstate(userId: string, fly: FlyClient | nu
     }
     if (e.resume_pending) {
       throw new EstateError(409, "resume_pending", "The estate is being resumed for an active subscription; it cannot be released.");
+    }
+    // A driver that read the record before it was suspended may still be inside a Fly call (create app,
+    // create machine): its call could land AFTER Fly answered "no app" below and leave an app without a
+    // record. Two independent refusals: a background worker's lease that has not ended (it clears the lease
+    // when it exits; a killed worker's lease ends within about 16 minutes), and a record written moments ago
+    // (the suspension itself, or any driver finishing its step; covers the drivers that hold no worker lease).
+    if (e.worker_until && !(new Date(e.worker_until).getTime() <= now.getTime())) {
+      throw new EstateError(409, "worker_active", "A background worker may still be working on this estate; nothing was released. Try again in a few minutes.");
+    }
+    if (!(now.getTime() - new Date(e.updated_at).getTime() >= RELEASE_QUIET_MS)) {
+      throw new EstateError(409, "estate_settling", "The estate record changed moments ago; nothing was released. Try again in a few minutes.");
     }
 
     const user = await getUserById(userId);
