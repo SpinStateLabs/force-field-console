@@ -37,6 +37,25 @@ describe("FlyClient request shapes", () => {
     await expect(new FlyClient(CFG, g.fetchImpl).createApp("ff-est-abc")).rejects.toBeInstanceOf(FlyError);
   });
 
+  it("lists the org's app names (positive control of a 404): complete list only, else FlyError", async () => {
+    const list = (body: unknown, status = 200) => fakeFetch((url) => (url === MACHINES_API + "/apps?org_slug=personal" ? { status, body } : undefined));
+    const ok = list({ total_apps: 2, apps: [{ name: "ff-est-a", status: "deployed" }, { name: "force-field-sandbox" }] });
+    expect(await new FlyClient(CFG, ok.fetchImpl).listAppNames(8000)).toEqual(["ff-est-a", "force-field-sandbox"]);
+    expect(ok.calls[0].init.method).toBe("GET");
+    expect(ok.calls[0].init.headers.authorization).toBe("Bearer fo1_test");
+    expect(await new FlyClient(CFG, list({ total_apps: 0, apps: [] }).fetchImpl).listAppNames()).toEqual([]);
+    for (const [label, f] of [
+      ["partial list", list({ total_apps: 3, apps: [{ name: "a" }, { name: "b" }] })],
+      ["no apps array", list({ total_apps: 0 })],
+      ["a nameless app", list({ total_apps: 1, apps: [{ id: "x" }] })],
+      ["no total", list({ apps: [{ name: "a" }] })],
+      ["HTTP 403", list({ error: "forbidden" }, 403)],
+      ["HTTP 404 (token cannot see the org)", list({ error: "not found" }, 404)],
+    ] as const) {
+      await expect(new FlyClient(CFG, f.fetchImpl).listAppNames(), label).rejects.toBeInstanceOf(FlyError);
+    }
+  });
+
   it("allocates IPs and sets secrets over GraphQL with the documented inputs", async () => {
     // Payload shapes as Fly's schema actually answers them (introspected and checked
     // against the sandbox on 2026-09-14): a SHARED v4 comes back on app.sharedIpAddress

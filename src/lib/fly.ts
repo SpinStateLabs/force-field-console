@@ -154,6 +154,21 @@ export class FlyClient {
     return r.body;
   }
 
+  /**
+   * Names of every app in the configured organization (Machines API `GET /v1/apps?org_slug=`). The answer is
+   * `{ total_apps, apps: [{ name, ... }] }` (MEASURED 2026-11-12). Fails closed: any non-2xx, a body of another shape,
+   * or `total_apps` different from the number of apps returned (a partial list) throws FlyError. Used by the estate
+   * release as the positive control of a 404 from getApp (a token that cannot see the org also gets a 404).
+   */
+  async listAppNames(timeoutMs = 20000): Promise<string[]> {
+    const body = await this.restOk("GET", `/apps?org_slug=${encodeURIComponent(this.cfg.org)}`, undefined, timeoutMs);
+    const apps = body?.apps;
+    if (!Array.isArray(apps) || !apps.every((a: any) => a && typeof a.name === "string") || body?.total_apps !== apps.length) {
+      throw new FlyError(200, "Fly list apps answered a body that is not a complete app list", null);
+    }
+    return apps.map((a: any) => a.name as string);
+  }
+
   /** Create the app; an already-existing app of that name is treated as success. */
   async createApp(name: string): Promise<void> {
     const r = await this.rest("POST", "/apps", { app_name: name, org_slug: this.cfg.org });
