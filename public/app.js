@@ -101,6 +101,7 @@ function showAuthView() {
   hide($("dash-view"));
   show($("auth-view"));
   $("keys-body").replaceChildren();
+  hide($("estate-released-note"));
   stopEstatePoll();
   $("auth-email").focus();
 }
@@ -381,6 +382,37 @@ async function retryEstate() {
   }
 }
 
+// Two steps on purpose: the first button only opens the confirmation; nothing is sent until "Yes, release it".
+function askReleaseEstate() {
+  setError($("estate-release-error"), "");
+  show($("estate-release-confirm"));
+  $("estate-release-no").focus();
+}
+
+function cancelReleaseEstate() {
+  hide($("estate-release-confirm"));
+  $("estate-release-btn").focus();
+}
+
+async function releaseEstate() {
+  const yes = $("estate-release-yes");
+  yes.disabled = true;
+  setError($("estate-release-error"), "");
+  const res = await api("/api/estate/release", { method: "POST", body: { confirm: "release" } });
+  yes.disabled = false;
+  hide($("estate-release-confirm"));
+  if (res.status === 401) { showAuthView(); return; }
+  if (res.status === 200 && res.data && res.data.released === true) {
+    hide($("estate-release"));
+    show($("estate-released-note"));
+    // The account has no estate record any more: re-read it so the tier, the estate panel and the chip agree.
+    const me = await api("/api/me");
+    if (me.status === 200 && me.data) enterDashboard(me.data); else loadEstate();
+    return;
+  }
+  setError($("estate-release-error"), errMessage(res.status, res.data));
+}
+
 function renderEstate(e, configured) {
   const chip = $("estate-status");
   const cls = { ready: "chip-ok", provisioning: "chip-warn", pending_manual: "chip-warn", suspended: "chip-err", error: "chip-err" };
@@ -436,6 +468,11 @@ function renderEstate(e, configured) {
 
   setError($("estate-error"), e.status === "error" && e.error ? e.error : "");
   if (e.status === "error") show($("estate-retry")); else hide($("estate-retry"));
+
+  // Release back to the shared sandbox: offered only for a settled suspension (the server checks billing and
+  // Fly itself and refuses otherwise). Any re-render closes an open confirmation.
+  hide($("estate-release-confirm"));
+  if (e.status === "suspended" && !e.suspend_pending && !e.resume_pending) show($("estate-release")); else hide($("estate-release"));
 
   // facts
   const facts = $("estate-facts");
@@ -724,6 +761,9 @@ $("upgrade-operator").addEventListener("click", (ev) => startCheckout("operator"
 $("upgrade-sovereign").addEventListener("click", (ev) => startCheckout("sovereign", ev.currentTarget));
 $("manage-billing").addEventListener("click", openBillingPortal);
 $("estate-retry").addEventListener("click", retryEstate);
+$("estate-release-btn").addEventListener("click", askReleaseEstate);
+$("estate-release-no").addEventListener("click", cancelReleaseEstate);
+$("estate-release-yes").addEventListener("click", releaseEstate);
 $("anthropic-form").addEventListener("submit", submitAnthropicKey);
 $("roster-form").addEventListener("submit", submitRoster);
 $("roster-scopes").addEventListener("input", () => { rosterDirty = true; });

@@ -144,6 +144,17 @@ export function estateKey(userId: string): string {
   return "estates/" + userId;
 }
 
+/**
+ * Audit copy of an estate record its owner released back to the shared sandbox (src/lib/release.ts), one per
+ * released record: "released_estates/<user id>/<the record's created_at>". It is also the record's TOMBSTONE:
+ * saveEstate refuses to re-create a record whose created_at has one. A record queued later (a new
+ * subscription) has a new created_at and is unaffected.
+ */
+export const RELEASED_ESTATES_PREFIX = "released_estates/";
+export function releasedEstateKey(userId: string, createdAt: string): string {
+  return RELEASED_ESTATES_PREFIX + userId + "/" + String(createdAt).replace(/[^0-9A-Za-z]/g, "-");
+}
+
 export async function getEstate(userId: string): Promise<Estate | null> {
   const store = await portalStore();
   return ((await store.get(estateKey(userId), { type: "json" })) as Estate | null) ?? null;
@@ -177,6 +188,11 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
     if (cur && opts.onlyIf && !opts.onlyIf(cur)) return false;
     let out: Estate = e;
     if (cur) out = opts.owns ? mergeOwned(cur, e, opts.owns) : mergeSuspendWins(cur, e);
+    // No stored record: this write would CREATE one. A copy of a record that its owner released back to the
+    // sandbox (src/lib/release.ts) must never bring it back: the released record's audit copy is its tombstone.
+    if (!read && (await store.get(releasedEstateKey(e.user_id, e.created_at), { type: "json" }))) {
+      throw new EstateError(409, "estate_released", "This estate was released back to the shared sandbox; nothing was written.");
+    }
     const ok = read ? await store.setJSONIfMatch(key, out, read.etag) : await store.setJSONIfNew(key, out);
     if (ok) {
       if (out !== e) Object.assign(e, out);
@@ -1215,6 +1231,11 @@ function configWriteKey(userId: string): string {
 export async function configWriteMarks(): Promise<Set<string>> {
   const { blobs } = await (await portalStore()).list({ prefix: CONFIG_WRITE_PREFIX });
   return new Set(blobs.map((b) => b.key.slice(CONFIG_WRITE_PREFIX.length)));
+}
+
+/** Drop the user's mark outright: its estate record is gone (released), so nothing is left to re-verify. */
+export async function clearConfigWrite(userId: string): Promise<void> {
+  await (await portalStore()).delete(configWriteKey(userId));
 }
 
 /** The mark: the start of the latest guarded write, plus the tick's re-verify backoff (absent until a read fails). */
