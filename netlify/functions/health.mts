@@ -6,7 +6,7 @@
 // deployment is configured for.
 import type { Context, Config } from "@netlify/functions";
 import { env, portalStore, storeScope } from "../../src/lib/store";
-import { stripeConfig } from "../../src/lib/stripe";
+import { sharedPriceIds, stripeConfig } from "../../src/lib/stripe";
 import { BILLING_FLAGS_KEY } from "../../src/lib/billing";
 import { flyConfig } from "../../src/lib/fly";
 
@@ -53,6 +53,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     unmatchedEvents = null;
   }
 
+  const billingCfg = stripeConfig();
   return new Response(
     JSON.stringify({
       ok: true,
@@ -63,7 +64,9 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       unmatched_price: unmatchedPrice,
       unmatched_events: unmatchedEvents,
       estate_attached: Boolean(env("ESTATE_URL")),
-      billing_configured: stripeConfig() !== null,
+      billing_configured: billingCfg !== null,
+      // A Stripe price id is configured for both tiers (it maps to no tier until STRIPE_PRICE_* is fixed); null when billing is not configured.
+      price_config_shared: billingCfg ? sharedPriceIds(billingCfg).length > 0 : null,
       provisioning_configured: flyConfig() !== null,
       // Which blob store this invocation uses: "site" on production, "deploy" elsewhere.
       // "deploy" on the production URL means records will not survive the next deploy.

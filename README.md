@@ -61,7 +61,7 @@ netlify dev
 | `STRIPE_WEBHOOK_SECRET` | For billing | Signing secret of the `/api/billing/webhook` endpoint (`whsec_…`). |
 | `STRIPE_PRICE_OPERATOR` | For billing | Stripe Price id billed for Operator. |
 | `STRIPE_PRICE_SOVEREIGN` | For billing | Stripe Price id billed for Sovereign. |
-| `STRIPE_PRICE_OPERATOR_ACCEPTED` / `STRIPE_PRICE_SOVEREIGN_ACCEPTED` | No | Further Price ids (comma separated) that map to the tier, e.g. the old Price after a price change or another interval. Never used for Checkout. An id listed for both tiers maps to neither. |
+| `STRIPE_PRICE_OPERATOR_ACCEPTED` / `STRIPE_PRICE_SOVEREIGN_ACCEPTED` | No | Further Price ids (comma separated) that map to the tier, e.g. the old Price after a price change or another interval. Never used for Checkout. An id listed for both tiers (sale or accepted) maps to neither: billing stays on, one `ALERT price_config_shared` line is logged, `/api/health` shows `price_config_shared: true`, and Checkout answers `501` for a tier whose own sale Price is shared, until the variables are fixed. |
 | `FLY_API_TOKEN` | For provisioning | Org-scoped Fly token (apps, volumes, machines, IPs, secrets). Provisioning is configured only when this, `FLY_ORG_SLUG`, `FLY_ESTATE_IMAGE` and `ESTATE_SECRET_MASTER` are all set. |
 | `FLY_ORG_SLUG` | For provisioning | The Fly organization that owns customer estates. |
 | `FLY_ESTATE_IMAGE` | For provisioning | The estate image to launch, e.g. `registry.fly.io/force-field-sandbox:<label>` — a label that was smoked and deployed on the sandbox first. Changing it (and redeploying) starts the rollout to existing estates, one per tick. |

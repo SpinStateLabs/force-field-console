@@ -37,7 +37,21 @@ function priceList(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-/** The billing configuration, or null when any of the four required variables is missing or a price id is shared by both tiers. */
+/** Price ids configured for BOTH tiers (primary or accepted), sorted; empty for a sound configuration. */
+export function sharedPriceIds(cfg: StripeConfig): string[] {
+  const operatorIds = new Set([cfg.prices.operator, ...(cfg.accepted?.operator ?? [])]);
+  return [...new Set([cfg.prices.sovereign, ...(cfg.accepted?.sovereign ?? [])].filter((id) => operatorIds.has(id)))].sort();
+}
+
+/** Shared-id sets already alerted in this process (stripeConfig runs on every billing and health request). */
+const sharedPriceAlerted = new Set<string>();
+
+/**
+ * The billing configuration, or null when any of the four required variables is missing. A price id configured for
+ * both tiers is a configuration error, but billing stays ON: the shared id maps to no tier (tierForPrice), every other
+ * price and every cancellation keeps working, Checkout refuses a tier whose own sale price is shared (billing.mts),
+ * /api/health reports price_config_shared, and one ALERT line per process says so (no ids in the log).
+ */
 export function stripeConfig(): StripeConfig | null {
   const secret_key = env("STRIPE_SECRET_KEY");
   const webhook_secret = env("STRIPE_WEBHOOK_SECRET");
@@ -46,14 +60,12 @@ export function stripeConfig(): StripeConfig | null {
   if (!secret_key || !webhook_secret || !operator || !sovereign) return null;
   const cfg: StripeConfig = { secret_key, webhook_secret, prices: { operator, sovereign } };
   const accepted = { operator: priceList(env("STRIPE_PRICE_OPERATOR_ACCEPTED")), sovereign: priceList(env("STRIPE_PRICE_SOVEREIGN_ACCEPTED")) };
-  // A price id that belongs to both tiers (primary or accepted) is a configuration error: fail closed like a missing
-  // variable (billing is not configured) rather than guess an entitlement.
-  const operatorIds = new Set([operator, ...accepted.operator]);
-  if ([sovereign, ...accepted.sovereign].some((id) => operatorIds.has(id))) {
-    console.error("billing: a Stripe price id is configured for both tiers; billing is treated as not configured until STRIPE_PRICE_* is fixed");
-    return null;
-  }
   if (accepted.operator.length || accepted.sovereign.length) cfg.accepted = accepted;
+  const shared = sharedPriceIds(cfg);
+  if (shared.length && !sharedPriceAlerted.has(shared.join(","))) {
+    sharedPriceAlerted.add(shared.join(","));
+    console.error("ALERT price_config_shared", JSON.stringify({ key: "price_config_shared", shared_ids: shared.length, sale_price_shared: shared.includes(operator) || shared.includes(sovereign) }));
+  }
   return cfg;
 }
 
