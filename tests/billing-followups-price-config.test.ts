@@ -131,4 +131,44 @@ describe("a price id shared by both tiers: alerted, billing stays on", () => {
     expect((await res.json()).url).toBe("https://checkout.stripe.com/c/cs_1");
     expect(new URLSearchParams(sent).get("line_items[0][price]")).toBe("price_sov");
   });
+
+  it("the ALERT says sale_price_shared:true when a tier's own sale price is the shared id", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.STRIPE_PRICE_OPERATOR = "price_sale_shared";
+    process.env.STRIPE_PRICE_SOVEREIGN = "price_sale_shared";
+    stripeConfig();
+    const alerts = spy.mock.calls.filter((c) => c[0] === "ALERT price_config_shared");
+    expect(alerts).toHaveLength(1);
+    expect(JSON.parse(String(alerts[0][1]))).toEqual({ key: "price_config_shared", shared_ids: 1, sale_price_shared: true });
+  });
+
+  it("a subscription ON the shared id never grants a tier: a new user stays sandbox, flagged and alerted", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.STRIPE_PRICE_OPERATOR_ACCEPTED = "price_dup";
+    process.env.STRIPE_PRICE_SOVEREIGN_ACCEPTED = "price_dup";
+    const user = await createUser("onshared@example.com", "sufficiently-long-pass");
+
+    const res = await webhook({ id: "evt_d1", type: "customer.subscription.updated", created: 100, data: { object: sub("price_dup", user.id) } });
+    expect(res.status).toBe(200);
+    const after = (await getUserById(user.id))!;
+    expect(after.tier).toBe("sandbox");
+    expect(after.billing?.price_unmatched).toBe(true);
+    expect(spy.mock.calls.filter((c) => c[0] === "ALERT unmatched_price")).toHaveLength(1);
+    expect(await health()).toMatchObject({ unmatched_price: true });
+  });
+
+  it("a paying customer whose active subscription moves onto the shared id keeps the tier (H1 keep rule)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.STRIPE_PRICE_OPERATOR_ACCEPTED = "price_dup";
+    process.env.STRIPE_PRICE_SOVEREIGN_ACCEPTED = "price_dup";
+    const user = await createUser("keep@example.com", "sufficiently-long-pass");
+
+    expect((await webhook({ id: "evt_k1", type: "customer.subscription.updated", created: 100, data: { object: sub("price_op", user.id) } })).status).toBe(200);
+    expect((await getUserById(user.id))!.tier).toBe("operator");
+
+    expect((await webhook({ id: "evt_k2", type: "customer.subscription.updated", created: 200, data: { object: sub("price_dup", user.id) } })).status).toBe(200);
+    const after = (await getUserById(user.id))!;
+    expect(after.tier).toBe("operator");
+    expect(after.billing?.price_unmatched).toBe(true);
+  });
 });
