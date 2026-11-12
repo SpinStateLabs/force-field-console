@@ -197,8 +197,18 @@ export async function listCustomerSubscriptions(cfg: StripeConfig, customer: str
   return Array.isArray(r?.data) ? (r.data as StripeSubscription[]) : [];
 }
 
-export function subscriptionPriceId(sub: StripeSubscription): string | null {
-  return sub.items?.data?.[0]?.price?.id ?? null;
+/**
+ * The price id that decides the tier. Without a config: the first item's (as before). With a config (audit L3): the
+ * item whose price maps to a tier, wherever it sits (an add-on item may come first); items of two DIFFERENT tiers are
+ * ambiguous and give null (maps to no tier, never a guess); no item maps: the first item's id, so the unmatched price
+ * is the one alerted.
+ */
+export function subscriptionPriceId(sub: StripeSubscription, cfg?: StripeConfig): string | null {
+  const first = sub.items?.data?.[0]?.price?.id ?? null;
+  if (!cfg) return first;
+  const mapped = (sub.items?.data ?? []).map((i) => i.price?.id).filter((id): id is string => Boolean(id) && tierForPrice(cfg, id) !== null);
+  if (mapped.length === 0) return first;
+  return new Set(mapped.map((id) => tierForPrice(cfg, id))).size === 1 ? mapped[0] : null;
 }
 
 /** Period end as unix seconds; newer API versions carry it on the item. */

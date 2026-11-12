@@ -271,7 +271,7 @@ export async function userForSubscription(sub: StripeSubscription, deps?: Pick<W
  */
 export async function applySubscription(user: User, sub: StripeSubscription, deps: WebhookDeps): Promise<Tier> {
   const now = deps.now ? deps.now() : new Date();
-  const priceId = subscriptionPriceId(sub);
+  const priceId = subscriptionPriceId(sub, deps.cfg);
   const paidTier = tierForPrice(deps.cfg, priceId);
   const granting = paidTier !== null && GRANTING_STATUSES.has(sub.status);
   // Audit H1: a subscription in a granting status on a price id no tier maps to (a price changed in env, another
@@ -429,7 +429,7 @@ export function checkoutIdempotencyKey(userId: string, tier: string, customerId:
   return "checkout-" + createHash("sha256").update(`${userId}|${tier}|${customerId ?? ""}|${bucket}`).digest("hex").slice(0, 32);
 }
 
-const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s)) !== null && GRANTING_STATUSES.has(s.status);
+const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s, deps.cfg)) !== null && GRANTING_STATUSES.has(s.status);
 
 /**
  * Win the subscription's ordering mark, then apply, all under the user's lock (one lock per user,
@@ -468,7 +468,7 @@ async function applyOrdered(
     const cur = fresh.billing;
     if (cur?.subscription_id && cur.subscription_id !== sub.id && !(grantsTier(deps, sub) && !GRANTING_STATUSES.has(cur.status))) {
       const others = { ...(cur.other_subs ?? {}) };
-      if (grantsTier(deps, sub)) others[sub.id] = { status: sub.status, price_id: subscriptionPriceId(sub) };
+      if (grantsTier(deps, sub)) others[sub.id] = { status: sub.status, price_id: subscriptionPriceId(sub, deps.cfg) };
       else delete others[sub.id];
       fresh.billing = { ...cur, other_subs: Object.keys(others).length ? others : undefined };
       await saveUser(fresh);
