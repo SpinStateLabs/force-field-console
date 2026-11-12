@@ -76,6 +76,7 @@
       <div id="billing-error" class="error-box hidden" role="alert"></div>
     </div>
 
+    <p id="estate-released-note" class="hint hidden" role="status">The suspended estate was released. This account and its API keys now reach the shared sandbox.</p>
     <div class="card panel hidden" id="estate-panel">
       <h2 class="panel-title">Dedicated estate</h2>
       <p class="estate-head">Status: <span id="estate-status" class="chip chip-warn">&hellip;</span>
@@ -86,6 +87,26 @@
       <div id="estate-error" class="error-box hidden" role="alert"></div>
       <div class="panel-actions">
         <button id="estate-retry" class="btn btn-secondary btn-small hidden" type="button">Retry provisioning</button>
+      </div>
+      <div id="estate-release" class="hidden">
+        <h3 class="sub-title">Return this account to the shared sandbox</h3>
+        <p class="hint">If you will not reactivate billing, you can release this suspended estate. Your account and its API keys
+          then reach the shared sandbox again instead of being refused. <strong>The dedicated estate's data is not carried
+          over</strong>: its ledger, agents, delegation tokens and attestation history are not available from the sandbox.
+          The release is refused, and nothing changes, while a subscription is active or while the estate's Fly app still
+          exists. A later subscription provisions a new, empty estate.</p>
+        <div class="panel-actions">
+          <button id="estate-release-btn" class="btn btn-secondary btn-small" type="button">Release suspended estate&hellip;</button>
+        </div>
+        <div id="estate-release-confirm" class="hidden" role="group" aria-labelledby="estate-release-question">
+          <p id="estate-release-question" class="warn-text">Release this estate and return to the shared sandbox? This cannot be undone, and the
+            dedicated estate's data is not carried over.</p>
+          <div class="panel-actions">
+            <button id="estate-release-yes" class="btn btn-danger btn-small" type="button">Yes, release it</button>
+            <button id="estate-release-no" class="btn btn-secondary btn-small" type="button">Cancel</button>
+          </div>
+        </div>
+        <div id="estate-release-error" class="error-box hidden" role="alert"></div>
       </div>
       <dl id="estate-facts" class="kv hidden"></dl>
       <details id="estate-log-wrap" class="hidden"><summary>Provisioning log</summary><pre class="code" id="estate-log"></pre></details>

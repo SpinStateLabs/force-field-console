@@ -92,10 +92,10 @@ netlify dev
 Browser ── static pages (public/, Netlify CDN)
    │
    ├─ cookie session ──> Netlify Functions: /api/auth/*  /api/me  /api/keys  /api/health
-   │                      /api/billing/{checkout,portal}   /api/estate/{advance,retry,anthropic-key,roster}
+   │                      /api/billing/{checkout,portal}   /api/estate/{advance,retry,anthropic-key,roster,release}
    │                                        │
    │                                        └── Netlify Blobs "portal" store
-   │                                            (users/, uid/, keys/, rate/, estates/, stripe_events/, stripe_customers/)
+   │                                            (users/, uid/, keys/, rate/, estates/, released_estates/, stripe_events/, stripe_customers/)
    │
    ├─ Stripe ── signed webhook ──> /api/billing/webhook  (the only writer of paid tiers)
    │
@@ -118,7 +118,8 @@ The gateway forwards method, body, `content-type`, `accept`, and the caller's `x
 (the estate's secret) and `x-ff-tenant` (the caller's user id) itself, overriding any caller value,
 and never forwards client cookies, `Authorization` or `x-api-key`. A provisioning estate answers `503 estate_provisioning`, a
 suspended one `403 estate_suspended`, a failed one `503 estate_error` — never a silent fall
-back to the sandbox, which would mix a tenant's data.
+back to the sandbox, which would mix a tenant's data. The one way back to the sandbox is explicit:
+the owner releases a suspended estate (`POST /api/estate/release`, see "Dedicated estates" below).
 A paying customer's provisioning that fails `MAX_ATTEMPTS` (6) times logs one `ALERT provision_failed`
 line, `/api/health` shows `provision_failed: true` (counted by the tick for paying users only), and the
 tick retries it automatically up to 3 times, 1 h / 2 h / 4 h after each failure (audit H2). After that only
@@ -206,7 +207,26 @@ fingerprint must equal the one generated at bootstrap) → `ready`.
   `upgrade_failed_image`) and halts the rollout for every estate while any estate has failed on
   that image. Nothing is destroyed, and the halt is lifted only by a new label.
 - A subscription that stops granting suspends the estate: the machine is stopped, the volume
-  is kept. Reactivation starts it again. Destroying an estate is a manual operator action.
+  is kept. Reactivation starts it again. Destroying an estate (its Fly app, machine and volume) is
+  a manual operator action; the console never deletes anything on Fly.
+- **Release back to the sandbox.** A suspended estate keeps its account refused (`403
+  estate_suspended`) for as long as its record exists. The signed-in owner can release their own
+  suspended estate from the dashboard (`POST /api/estate/release` with `{"confirm":"release"}`; the
+  target is always the session's account). It is refused, and nothing changes, unless all of these
+  hold under the per-user lock: the record is `suspended` with no suspension and no resume pending,
+  no background worker's lease still running and no write in the last 2 minutes (a provisioning
+  call that was in flight when the suspension landed may still create something on Fly);
+  billing does not grant (sandbox tier, no subscription in a granting status, no other granting
+  subscription remembered); and Fly, asked at that moment, has no app for the estate (Fly not
+  configured or not answering is a refusal: `501` / `502`). A release writes an audit copy of the
+  record to `released_estates/<user id>/<created_at>` (no secrets are on the record), deletes
+  `estates/<user id>`, drops the account's config-write mark and logs `estate released`. The
+  account's keys then reach the shared sandbox again. The dedicated estate's data is not carried
+  over. The audit copy is also a tombstone: a stale copy of the released record can never re-create
+  it (`409 estate_released`) nor overwrite a record queued after it (`409 estate_replaced`); a
+  later granting subscription queues a new record and provisions a fresh estate. Suspension keeps
+  the Fly app, so in practice a release succeeds only after an operator has removed the app (or
+  when none was ever created); until then the control answers `409 fly_app_exists`.
 - Customer-facing usage (register an agent, mint a token, a governed LLM call, an attestation
   pack, off-box verification): [docs/estate-quickstart.md](docs/estate-quickstart.md).
 - Unconfigured: estate mutations answer `501 provisioning_not_configured`; a paid account is

@@ -2,7 +2,8 @@
 // The account's dedicated estate: status, one synchronous provisioning step
 // (a fallback; the dashboard kicks the background worker instead), retry, the customer's
 // Anthropic key placement (forwarded to Fly secrets, never stored, never
-// logged) and the DOA roster row. Every mutation answers 501 when
+// logged), the DOA roster row, and the owner's release of a suspended estate
+// back to the shared sandbox. Every mutation answers 501 when
 // provisioning is not configured on this deployment.
 import type { Context, Config } from "@netlify/functions";
 import { readSession } from "../../src/lib/session";
@@ -19,6 +20,7 @@ import {
   updateEstateRoster,
 } from "../../src/lib/estates";
 import { kickWorker } from "../../src/lib/worker";
+import { releaseSuspendedEstate } from "../../src/lib/release";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -71,6 +73,23 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       return json(200, { outcome: r.outcome, note: r.note, estate: publicEstate(r.estate) });
     }
 
+    if (req.method === "POST" && pathname === "/api/estate/release") {
+      // The signed-in owner releases their OWN suspended estate back to the shared sandbox; the target is the
+      // session's user id, never a request field. Every condition (suspended, billing not active, no Fly app)
+      // is checked in the library under the user lock; a refusal changes nothing.
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return err(400, "bad_json", "Request body must be valid JSON.");
+      }
+      if (body?.confirm !== "release") {
+        return err(400, "confirmation_required", 'Releasing an estate is permanent for its data; send {"confirm":"release"} to confirm.');
+      }
+      const r = await releaseSuspendedEstate(user.id, flyClientOrNull());
+      return json(200, { released: true, released_at: r.released_at, estate: null, route: "sandbox" });
+    }
+
     if (req.method === "POST" && pathname === "/api/estate/anthropic-key") {
       const fly = flyClientOrNull();
       if (!fly) return err(501, "provisioning_not_configured", NOT_CONFIGURED);
@@ -109,5 +128,5 @@ export default async (req: Request, _context: Context): Promise<Response> => {
 };
 
 export const config: Config = {
-  path: ["/api/estate", "/api/estate/advance", "/api/estate/retry", "/api/estate/anthropic-key", "/api/estate/roster"],
+  path: ["/api/estate", "/api/estate/advance", "/api/estate/retry", "/api/estate/anthropic-key", "/api/estate/roster", "/api/estate/release"],
 };
