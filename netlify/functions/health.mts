@@ -45,9 +45,9 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   let unmatchedPrice: boolean | null = null;
   let unmatchedEvents: boolean | null = null;
   try {
-    const f = (await (await portalStore()).get(BILLING_FLAGS_KEY, { type: "json" })) as { unmatched_price_users?: unknown[]; unmatched_events?: unknown[] } | null;
+    const f = (await (await portalStore()).get(BILLING_FLAGS_KEY, { type: "json" })) as { unmatched_price_users?: unknown[]; unmatched_events?: unknown[]; unmatched_events_dropped?: number } | null;
     unmatchedPrice = (f?.unmatched_price_users?.length ?? 0) > 0;
-    unmatchedEvents = (f?.unmatched_events?.length ?? 0) > 0;
+    unmatchedEvents = (f?.unmatched_events?.length ?? 0) > 0 || Number(f?.unmatched_events_dropped ?? 0) > 0;
   } catch {
     unmatchedPrice = null;
     unmatchedEvents = null;
