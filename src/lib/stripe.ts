@@ -37,7 +37,7 @@ function priceList(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-/** The billing configuration, or null when any of the four required variables is missing. */
+/** The billing configuration, or null when any of the four required variables is missing or a price id is shared by both tiers. */
 export function stripeConfig(): StripeConfig | null {
   const secret_key = env("STRIPE_SECRET_KEY");
   const webhook_secret = env("STRIPE_WEBHOOK_SECRET");
@@ -46,6 +46,13 @@ export function stripeConfig(): StripeConfig | null {
   if (!secret_key || !webhook_secret || !operator || !sovereign) return null;
   const cfg: StripeConfig = { secret_key, webhook_secret, prices: { operator, sovereign } };
   const accepted = { operator: priceList(env("STRIPE_PRICE_OPERATOR_ACCEPTED")), sovereign: priceList(env("STRIPE_PRICE_SOVEREIGN_ACCEPTED")) };
+  // A price id that belongs to both tiers (primary or accepted) is a configuration error: fail closed like a missing
+  // variable (billing is not configured) rather than guess an entitlement.
+  const operatorIds = new Set([operator, ...accepted.operator]);
+  if ([sovereign, ...accepted.sovereign].some((id) => operatorIds.has(id))) {
+    console.error("billing: a Stripe price id is configured for both tiers; billing is treated as not configured until STRIPE_PRICE_* is fixed");
+    return null;
+  }
   if (accepted.operator.length || accepted.sovereign.length) cfg.accepted = accepted;
   return cfg;
 }

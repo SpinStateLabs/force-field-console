@@ -197,9 +197,8 @@ describe("H1: an active subscription on an unconfigured price keeps the tier and
   });
 
   it("an id listed for both tiers is ambiguous and maps to no tier", async () => {
-    process.env.STRIPE_PRICE_OPERATOR_ACCEPTED = "price_dup";
-    process.env.STRIPE_PRICE_SOVEREIGN_ACCEPTED = "price_dup,price_op";
-    const cfg = stripeConfig()!;
+    // stripeConfig() now rejects this (billing-followups-price-config.test.ts); tierForPrice stays defensive for a hand-built config.
+    const cfg = { secret_key: "sk_test_x", webhook_secret: "whsec_test", prices: { operator: "price_op", sovereign: "price_sov" }, accepted: { operator: ["price_dup"], sovereign: ["price_dup", "price_op"] } };
     expect(tierForPrice(cfg, "price_dup")).toBeNull();
     expect(tierForPrice(cfg, "price_op")).toBeNull();
     expect(tierForPrice(cfg, "price_sov")).toBe("sovereign");
