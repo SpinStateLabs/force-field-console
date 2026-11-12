@@ -232,6 +232,38 @@ fingerprint must equal the one generated at bootstrap) → `ready`.
 - Unconfigured: estate mutations answer `501 provisioning_not_configured`; a paid account is
   recorded as `pending_manual` (provisioned by hand) and its keys keep reaching the sandbox.
 
+### Runbook: a paying customer's provisioning failed (audit H2)
+
+- **The alert.** When a provisioning step has failed `MAX_ATTEMPTS` (6) times the estate goes to
+  `status: "error"` and the function logs one line per transition:
+  `ALERT provision_failed {"key":"provision_failed","user_id","app","step","attempts","auto_retries_done","next_auto_retry_at"}`
+  (no email, no secrets). Watch the function log for `ALERT provision_failed`; the same state
+  shows as `provision_failed: true` on `/api/health`, which the scheduled tick recomputes every 2
+  minutes from the estates of users whose subscription grants a tier (`null` until a tick has run).
+  The customer's gateway answers `503 estate_error` meanwhile.
+- **See the state.** The owner's `GET /api/estate` (and the dashboard) shows `status`, `step`,
+  `attempts`, `error` (fixed generic text; the detail is in the server log under
+  `estate provision: step <step> failed`) and the last 20 `log` entries, which say whether an
+  automatic retry is scheduled. The retry bookkeeping itself, `provision_retry` (`count` of
+  automatic retries done, `next_retry_at` or null), is on the stored record `estates/<user id>`
+  and is not in the API output.
+- **Automatic retry.** The tick puts an estate whose provisioning exhausted its attempts back to
+  `provisioning` (attempts reset, same step) when `next_retry_at` is due: 1 h after the first
+  failure, 2 h after the second, 4 h after the third. It does so only for a user whose
+  subscription still grants a tier, only while no suspension is pending, and at most once per
+  failure. A missing app or machine (`estate_app_missing`, `machine_missing`) is counted but never
+  retried automatically.
+- **Retry by hand.** Fix the cause (see the server log), then use the dashboard's "Retry
+  provisioning" button, shown while the status is `error` (`POST /api/estate/retry`, owner
+  session). It resets the attempt counter, keeps the failed step, clears any pending automatic
+  retry, and starts the background worker. `409 not_failed` means the stored estate is no longer in
+  `error` (already retried); `501` means provisioning is not configured.
+- **When automatic retry stops.** After 3 automatic retries (`next_retry_at` becomes null and the
+  log says "automatic retries exhausted"), when the user stops paying, or after a manual retry
+  (which supersedes the pending one). From then on only a manual retry or an operator moves the
+  estate. A successful provisioning (`ready`) resets the count, so a later failure gets the full
+  three again.
+
 ## Honest state of this deployment
 
 Enforced-vs-Declared: this section states what the code actually does and what has been
