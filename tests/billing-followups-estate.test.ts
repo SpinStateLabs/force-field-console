@@ -55,3 +55,33 @@ describe("retryEstate is conditional on the stored status being error", () => {
     expect((await getEstate(user.id))!.provision_retry!.next_retry_at).toBeNull();
   });
 });
+
+describe("provision_retry is reset when provisioning succeeds", () => {
+  const armedFetch = async (url: string) => {
+    const body: Record<string, any> = {
+      "/ledger/health": { signing: "on", require_signing: true, appendable: true, key_fingerprint: "fs" },
+      "/gateway/health": { enforce: true, tool_check: true },
+      "/attest/health": { signing: "on" },
+    };
+    const b = body[new URL(url).pathname];
+    return b ? new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } }) : new Response("", { status: 503 });
+  };
+
+  it("wait_armed -> ready clears a leftover provision_retry", async () => {
+    const e = (await getEstate(user.id))!;
+    Object.assign(e, { step: "wait_armed", machine_id: "m_1", volume_id: "v_1", fingerprints: { "ledger-sign": "fs" }, provision_retry: { count: 2, next_retry_at: null } });
+    await saveEstate(e);
+    const r = await advanceEstate((await getEstate(user.id))!, {} as any, { fetchImpl: armedFetch as any });
+    expect(r.estate.status).toBe("ready");
+    expect((await getEstate(user.id))!.provision_retry ?? null).toBeNull();
+  });
+
+  it("step done -> ready clears a leftover provision_retry", async () => {
+    const e = (await getEstate(user.id))!;
+    Object.assign(e, { step: "done", provision_retry: { count: 1, next_retry_at: null } });
+    await saveEstate(e);
+    const r = await advanceEstate((await getEstate(user.id))!, {} as any);
+    expect(r.estate.status).toBe("ready");
+    expect((await getEstate(user.id))!.provision_retry ?? null).toBeNull();
+  });
+});

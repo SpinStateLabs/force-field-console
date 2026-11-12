@@ -530,6 +530,7 @@ export async function advanceEstate(
   }
   if (e.step === "done") {
     e.status = "ready";
+    e.provision_retry = null;
     await saveEstate(e, now);
     return { estate: e, outcome: "done", note: "ready" };
   }
@@ -658,6 +659,7 @@ export async function advanceEstate(
             throw new EstateError(500, "fingerprint_mismatch", "the ledger reports a signing key that is not the one generated at bootstrap");
           }
           e.status = "ready";
+          e.provision_retry = null; // provisioning succeeded: a later failure gets the full automatic-retry allowance again
           e.url = origin;
           e.ready_at = now.toISOString();
           nextStep(e, `armed and healthy at ${origin}`, now);
