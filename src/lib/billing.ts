@@ -43,7 +43,9 @@ export const UNMATCHED_EVENTS_PREFIX = "ops/unmatched_events/";
  * removes them once resolved, together with their ops/unmatched_events/<id> records).
  */
 export const BILLING_FLAGS_KEY = "ops/billing_flags";
-export type BillingFlags = { unmatched_price_users: string[]; unmatched_events: string[] };
+/** The id list is bounded: the newest MAX_UNMATCHED_EVENT_IDS ids stay; older ones are counted in unmatched_events_dropped (their ops/unmatched_events/<id> records are kept). */
+export const MAX_UNMATCHED_EVENT_IDS = 200;
+export type BillingFlags = { unmatched_price_users: string[]; unmatched_events: string[]; unmatched_events_dropped?: number };
 
 /** Read-modify-write of BILLING_FLAGS_KEY under the store's etag compare-and-set; `mutate` returns false for "no change". */
 export async function updateBillingFlags(mutate: (f: BillingFlags) => boolean): Promise<void> {
@@ -51,6 +53,7 @@ export async function updateBillingFlags(mutate: (f: BillingFlags) => boolean): 
   for (let i = 0; i < 8; i++) {
     const read = await store.getWithEtag(BILLING_FLAGS_KEY);
     const f: BillingFlags = { unmatched_price_users: [...(read?.data?.unmatched_price_users ?? [])], unmatched_events: [...(read?.data?.unmatched_events ?? [])] };
+    if (Number(read?.data?.unmatched_events_dropped) > 0) f.unmatched_events_dropped = Number(read!.data.unmatched_events_dropped);
     if (!mutate(f)) return;
     if (read ? await store.setJSONIfMatch(BILLING_FLAGS_KEY, f, read.etag) : await store.setJSONIfNew(BILLING_FLAGS_KEY, f)) return;
   }
@@ -72,7 +75,16 @@ export async function recordUnmatchedEvent(eventId: string, eventType: string, s
     console.error("billing: could not persist the unmatched-event record for", eventId, "-", String(err?.message ?? err).slice(0, 200));
   }
   try {
-    await updateBillingFlags((f) => (f.unmatched_events.includes(eventId) ? false : (f.unmatched_events.push(eventId), true)));
+    await updateBillingFlags((f) => {
+      if (f.unmatched_events.includes(eventId)) return false;
+      f.unmatched_events.push(eventId);
+      const over = f.unmatched_events.length - MAX_UNMATCHED_EVENT_IDS;
+      if (over > 0) {
+        f.unmatched_events.splice(0, over);
+        f.unmatched_events_dropped = (f.unmatched_events_dropped ?? 0) + over;
+      }
+      return true;
+    });
   } catch (err: any) {
     console.error("billing: could not flag the unmatched event", eventId, "for /api/health -", String(err?.message ?? err).slice(0, 200));
   }
@@ -259,7 +271,7 @@ export async function userForSubscription(sub: StripeSubscription, deps?: Pick<W
  */
 export async function applySubscription(user: User, sub: StripeSubscription, deps: WebhookDeps): Promise<Tier> {
   const now = deps.now ? deps.now() : new Date();
-  const priceId = subscriptionPriceId(sub);
+  const priceId = subscriptionPriceId(sub, deps.cfg);
   const paidTier = tierForPrice(deps.cfg, priceId);
   const granting = paidTier !== null && GRANTING_STATUSES.has(sub.status);
   // Audit H1: a subscription in a granting status on a price id no tier maps to (a price changed in env, another
@@ -417,7 +429,7 @@ export function checkoutIdempotencyKey(userId: string, tier: string, customerId:
   return "checkout-" + createHash("sha256").update(`${userId}|${tier}|${customerId ?? ""}|${bucket}`).digest("hex").slice(0, 32);
 }
 
-const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s)) !== null && GRANTING_STATUSES.has(s.status);
+const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s, deps.cfg)) !== null && GRANTING_STATUSES.has(s.status);
 
 /**
  * Win the subscription's ordering mark, then apply, all under the user's lock (one lock per user,
@@ -456,7 +468,7 @@ async function applyOrdered(
     const cur = fresh.billing;
     if (cur?.subscription_id && cur.subscription_id !== sub.id && !(grantsTier(deps, sub) && !GRANTING_STATUSES.has(cur.status))) {
       const others = { ...(cur.other_subs ?? {}) };
-      if (grantsTier(deps, sub)) others[sub.id] = { status: sub.status, price_id: subscriptionPriceId(sub) };
+      if (grantsTier(deps, sub)) others[sub.id] = { status: sub.status, price_id: subscriptionPriceId(sub, deps.cfg) };
       else delete others[sub.id];
       fresh.billing = { ...cur, other_subs: Object.keys(others).length ? others : undefined };
       await saveUser(fresh);

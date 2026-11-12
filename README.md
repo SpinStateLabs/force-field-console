@@ -61,7 +61,7 @@ netlify dev
 | `STRIPE_WEBHOOK_SECRET` | For billing | Signing secret of the `/api/billing/webhook` endpoint (`whsec_…`). |
 | `STRIPE_PRICE_OPERATOR` | For billing | Stripe Price id billed for Operator. |
 | `STRIPE_PRICE_SOVEREIGN` | For billing | Stripe Price id billed for Sovereign. |
-| `STRIPE_PRICE_OPERATOR_ACCEPTED` / `STRIPE_PRICE_SOVEREIGN_ACCEPTED` | No | Further Price ids (comma separated) that map to the tier, e.g. the old Price after a price change or another interval. Never used for Checkout. An id listed for both tiers maps to neither. |
+| `STRIPE_PRICE_OPERATOR_ACCEPTED` / `STRIPE_PRICE_SOVEREIGN_ACCEPTED` | No | Further Price ids (comma separated) that map to the tier, e.g. the old Price after a price change or another interval. Never used for Checkout. An id listed for both tiers (sale or accepted) maps to neither: billing stays on, one `ALERT price_config_shared` line is logged, `/api/health` shows `price_config_shared: true`, and Checkout answers `501` for a tier whose own sale Price is shared, until the variables are fixed. |
 | `FLY_API_TOKEN` | For provisioning | Org-scoped Fly token (apps, volumes, machines, IPs, secrets). Provisioning is configured only when this, `FLY_ORG_SLUG`, `FLY_ESTATE_IMAGE` and `ESTATE_SECRET_MASTER` are all set. |
 | `FLY_ORG_SLUG` | For provisioning | The Fly organization that owns customer estates. |
 | `FLY_ESTATE_IMAGE` | For provisioning | The estate image to launch, e.g. `registry.fly.io/force-field-sandbox:<label>` — a label that was smoked and deployed on the sandbox first. Changing it (and redeploying) starts the rollout to existing estates, one per tick. |
@@ -153,7 +153,11 @@ the dashboard retry or an operator moves it; a missing app or machine is flagged
   (event id, type, subscription id; no email or customer id), is recorded under
   `ops/unmatched_events/<event id>` and listed in `ops/billing_flags`; `/api/health` shows
   `unmatched_events: true` until an operator, after resolving it, removes the id from
-  `ops/billing_flags`. Health reads that one record only (no listing).
+  `ops/billing_flags`. Health reads that one record only (no listing). The id list keeps the
+  newest 200 ids; older ids are counted in `unmatched_events_dropped` in the same record (their
+  `ops/unmatched_events/<event id>` records stay and are found by listing that prefix). Nothing
+  clears that counter automatically: `unmatched_events` stays `true` until the operator also
+  removes `unmatched_events_dropped` (or sets it to 0) after resolving the dropped events.
 
 ## Dedicated estates (Fly.io)
 
@@ -231,6 +235,39 @@ fingerprint must equal the one generated at bootstrap) → `ready`.
   pack, off-box verification): [docs/estate-quickstart.md](docs/estate-quickstart.md).
 - Unconfigured: estate mutations answer `501 provisioning_not_configured`; a paid account is
   recorded as `pending_manual` (provisioned by hand) and its keys keep reaching the sandbox.
+
+### Runbook: a paying customer's provisioning failed (audit H2)
+
+- **The alert.** When a provisioning step has failed `MAX_ATTEMPTS` (6) times the estate goes to
+  `status: "error"` and the function logs one line per transition:
+  `ALERT provision_failed {"key":"provision_failed","user_id","app","step","attempts","auto_retries_done","next_auto_retry_at"}`
+  (no email, no secrets). Watch the function log for `ALERT provision_failed`; the same state
+  shows as `provision_failed: true` on `/api/health`, which the scheduled tick recomputes every 2
+  minutes from the estates of users whose subscription grants a tier (`null` until a tick has run).
+  The customer's gateway answers `503 estate_error` meanwhile.
+- **See the state.** The owner's `GET /api/estate` (and the dashboard) shows `status`, `step`,
+  `attempts`, `error` (short redacted text; the detail is in the server log under
+  `estate provision: step <step> failed`) and the last 20 `log` entries, which say whether an
+  automatic retry is scheduled. The retry bookkeeping itself, `provision_retry` (`count` of
+  automatic retries done, `next_retry_at` or null), is on the stored record `estates/<user id>`
+  and is not in the API output.
+- **Automatic retry.** The tick puts an estate whose provisioning exhausted its attempts back to
+  `provisioning` (attempts reset, same step) when `next_retry_at` is due: 1 h after the first
+  failure, 2 h after the second, 4 h after the third. It does so only for a user whose
+  subscription still grants a tier, only while no suspension is pending, and at most once per
+  failure. A missing app or machine (`estate_app_missing`, `machine_missing`) is counted but never
+  retried automatically.
+- **Retry by hand.** Fix the cause (see the server log), then use the dashboard's "Retry
+  provisioning" button, shown while the status is `error` (`POST /api/estate/retry`, owner
+  session). It resets the attempt counter, keeps the failed step, clears any pending automatic
+  retry, and starts the background worker. `409 not_failed` means the stored estate is no longer in
+  `error` (already retried); `501` means provisioning is not configured.
+- **When automatic retry stops.** After 3 automatic retries (`next_retry_at` becomes null and the
+  log says "automatic retries exhausted") or when the user stops paying. From then on only a
+  manual retry or an operator moves the estate. A manual retry clears the pending automatic retry
+  but keeps the count: if that retry fails too, a new automatic retry is scheduled while fewer
+  than 3 have been done. A successful provisioning (`ready`) resets the count, so a later failure
+  gets the full three again.
 
 ## Honest state of this deployment
 

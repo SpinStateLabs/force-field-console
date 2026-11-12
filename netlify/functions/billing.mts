@@ -14,6 +14,7 @@ import {
   createCheckoutSession,
   createPortalSession,
   stripeConfig,
+  tierForPrice,
   verifyStripeSignature,
 } from "../../src/lib/stripe";
 import { checkoutIdempotencyKey, claimCheckout, claimEvent, eventDone, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
@@ -103,6 +104,11 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       const tier = body?.tier;
       if (tier !== "operator" && tier !== "sovereign") {
         return err(400, "bad_tier", "tier must be \"operator\" or \"sovereign\".");
+      }
+      // A sale price that is also configured for the other tier maps to no tier: selling it would take money and
+      // grant nothing. Refuse that tier until STRIPE_PRICE_* is fixed (ALERT price_config_shared is in the log).
+      if (tierForPrice(cfg, cfg.prices[tier as "operator" | "sovereign"]) !== tier) {
+        return err(501, "billing_not_configured", NOT_CONFIGURED);
       }
       if (user.billing?.subscription_id && GRANTING_STATUSES.has(user.billing.status)) {
         return err(409, "already_subscribed", "You already have a subscription; use Manage billing to change plans.");

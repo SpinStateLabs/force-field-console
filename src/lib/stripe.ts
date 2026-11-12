@@ -37,7 +37,21 @@ function priceList(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-/** The billing configuration, or null when any of the four required variables is missing. */
+/** Price ids configured for BOTH tiers (primary or accepted), sorted; empty for a sound configuration. */
+export function sharedPriceIds(cfg: StripeConfig): string[] {
+  const operatorIds = new Set([cfg.prices.operator, ...(cfg.accepted?.operator ?? [])]);
+  return [...new Set([cfg.prices.sovereign, ...(cfg.accepted?.sovereign ?? [])].filter((id) => operatorIds.has(id)))].sort();
+}
+
+/** Shared-id sets already alerted in this process (stripeConfig runs on every billing and health request). */
+const sharedPriceAlerted = new Set<string>();
+
+/**
+ * The billing configuration, or null when any of the four required variables is missing. A price id configured for
+ * both tiers is a configuration error, but billing stays ON: the shared id maps to no tier (tierForPrice), every other
+ * price and every cancellation keeps working, Checkout refuses a tier whose own sale price is shared (billing.mts),
+ * /api/health reports price_config_shared, and one ALERT line per process says so (no ids in the log).
+ */
 export function stripeConfig(): StripeConfig | null {
   const secret_key = env("STRIPE_SECRET_KEY");
   const webhook_secret = env("STRIPE_WEBHOOK_SECRET");
@@ -47,6 +61,11 @@ export function stripeConfig(): StripeConfig | null {
   const cfg: StripeConfig = { secret_key, webhook_secret, prices: { operator, sovereign } };
   const accepted = { operator: priceList(env("STRIPE_PRICE_OPERATOR_ACCEPTED")), sovereign: priceList(env("STRIPE_PRICE_SOVEREIGN_ACCEPTED")) };
   if (accepted.operator.length || accepted.sovereign.length) cfg.accepted = accepted;
+  const shared = sharedPriceIds(cfg);
+  if (shared.length && !sharedPriceAlerted.has(shared.join(","))) {
+    sharedPriceAlerted.add(shared.join(","));
+    console.error("ALERT price_config_shared", JSON.stringify({ key: "price_config_shared", shared_ids: shared.length, sale_price_shared: shared.includes(operator) || shared.includes(sovereign) }));
+  }
   return cfg;
 }
 
@@ -190,8 +209,18 @@ export async function listCustomerSubscriptions(cfg: StripeConfig, customer: str
   return Array.isArray(r?.data) ? (r.data as StripeSubscription[]) : [];
 }
 
-export function subscriptionPriceId(sub: StripeSubscription): string | null {
-  return sub.items?.data?.[0]?.price?.id ?? null;
+/**
+ * The price id that decides the tier. Without a config: the first item's (as before). With a config (audit L3): the
+ * item whose price maps to a tier, wherever it sits (an add-on item may come first); items of two DIFFERENT tiers are
+ * ambiguous and give null (maps to no tier, never a guess); no item maps: the first item's id, so the unmatched price
+ * is the one alerted.
+ */
+export function subscriptionPriceId(sub: StripeSubscription, cfg?: StripeConfig): string | null {
+  const first = sub.items?.data?.[0]?.price?.id ?? null;
+  if (!cfg) return first;
+  const mapped = (sub.items?.data ?? []).map((i) => i.price?.id).filter((id): id is string => Boolean(id) && tierForPrice(cfg, id) !== null);
+  if (mapped.length === 0) return first;
+  return new Set(mapped.map((id) => tierForPrice(cfg, id))).size === 1 ? mapped[0] : null;
 }
 
 /** Period end as unix seconds; newer API versions carry it on the item. */

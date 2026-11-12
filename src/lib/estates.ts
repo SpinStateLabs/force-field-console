@@ -530,6 +530,7 @@ export async function advanceEstate(
   }
   if (e.step === "done") {
     e.status = "ready";
+    e.provision_retry = null;
     await saveEstate(e, now);
     return { estate: e, outcome: "done", note: "ready" };
   }
@@ -658,6 +659,7 @@ export async function advanceEstate(
             throw new EstateError(500, "fingerprint_mismatch", "the ledger reports a signing key that is not the one generated at bootstrap");
           }
           e.status = "ready";
+          e.provision_retry = null; // provisioning succeeded: a later failure gets the full automatic-retry allowance again
           e.url = origin;
           e.ready_at = now.toISOString();
           nextStep(e, `armed and healthy at ${origin}`, now);
@@ -721,7 +723,11 @@ export async function retryEstate(e: Estate, now: Date = new Date()): Promise<Es
   // A manual retry supersedes a pending automatic one; the count of automatic retries already done is kept.
   if (e.provision_retry) e.provision_retry = { count: e.provision_retry.count, next_retry_at: null };
   logEstate(e, e.step, "retry requested", now);
-  await saveEstate(e, now);
+  // Conditional on the STORED record still being a failure: a stale copy (the tick auto-retried it, or another retry won)
+  // must not reset the retry count and give one extra automatic retry.
+  if (!(await saveEstate(e, now, { onlyIf: (cur) => cur.status === "error" }))) {
+    throw new EstateError(409, "not_failed", "Only a failed estate can be retried.");
+  }
   return e;
 }
 
