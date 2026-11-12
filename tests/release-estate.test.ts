@@ -255,6 +255,18 @@ describe("releaseSuspendedEstate: refusals change nothing", () => {
     const fly = fakeFly({ [e.app]: { name: e.app } });
     expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([409, "fly_app_exists"]);
     expect(fly.asked).toEqual([e.app]);
+    expect(fly.listed).toBe(0); // an app found by GET needs no list: the list comes after the GET loop
+    await expectUntouched(e);
+  });
+
+  it("409 when the record names another app and only the DERIVED name is in the org list (GET 404 for both)", async () => {
+    const e = await suspendedEstate({ app: "ff-est-0ddba11c" });
+    const fly = fakeFly();
+    fly.listExtra = [newAppName(user.id)];
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await refusal(releaseSuspendedEstate(user.id, fly as any, NOW))).toEqual([409, "fly_app_exists"]);
+    expect(fly.asked).toEqual(["ff-est-0ddba11c", newAppName(user.id)]);
+    expect(fly.listed).toBe(1);
     await expectUntouched(e);
   });
 

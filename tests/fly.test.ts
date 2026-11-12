@@ -43,9 +43,10 @@ describe("FlyClient request shapes", () => {
     expect(await new FlyClient(CFG, ok.fetchImpl).listAppNames(8000)).toEqual(["ff-est-a", "force-field-sandbox"]);
     expect(ok.calls[0].init.method).toBe("GET");
     expect(ok.calls[0].init.headers.authorization).toBe("Bearer fo1_test");
-    expect(await new FlyClient(CFG, list({ total_apps: 0, apps: [] }).fetchImpl).listAppNames()).toEqual([]);
     for (const [label, f] of [
       ["partial list", list({ total_apps: 3, apps: [{ name: "a" }, { name: "b" }] })],
+      ["an empty list (never proof of absence)", list({ total_apps: 0, apps: [] })],
+      ["total below the count", list({ total_apps: 1, apps: [{ name: "a" }, { name: "b" }] })],
       ["no apps array", list({ total_apps: 0 })],
       ["a nameless app", list({ total_apps: 1, apps: [{ id: "x" }] })],
       ["no total", list({ apps: [{ name: "a" }] })],
