@@ -115,4 +115,20 @@ describe("a price id shared by both tiers: alerted, billing stays on", () => {
     expect((await res.json()).error.code).toBe("billing_not_configured");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it("Checkout for the other tier, whose sale price is not shared, still reaches Stripe with its own price", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let sent = "";
+    vi.spyOn(globalThis, "fetch").mockImplementation((async (_url: any, init?: any) => {
+      sent = String(init?.body ?? "");
+      return new Response(JSON.stringify({ id: "cs_1", url: "https://checkout.stripe.com/c/cs_1" }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as any);
+    process.env.STRIPE_PRICE_SOVEREIGN_ACCEPTED = "price_op"; // only the operator sale price is shared
+    const user = await createUser("buy2@example.com", "sufficiently-long-pass");
+    const cookie = sessionCookie(await issueSession(user.id)).split(";")[0];
+    const res = await billingHandler(new Request("http://portal.test/api/billing/checkout", { method: "POST", headers: { cookie }, body: JSON.stringify({ tier: "sovereign" }) }), ctx);
+    expect(res.status).toBe(200);
+    expect((await res.json()).url).toBe("https://checkout.stripe.com/c/cs_1");
+    expect(new URLSearchParams(sent).get("line_items[0][price]")).toBe("price_sov");
+  });
 });
