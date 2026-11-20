@@ -320,7 +320,7 @@ function route(moveFocus) {
   renderNav(i);
   const title = i === -1 ? OVERVIEW.title : label(STEPS[i]);
   document.title = title + " — Force-Field Console";
-  $("setup-status-line").textContent = !ctx.loaded ? "Checking session…" : ctx.signedIn ? "Signed in as " + (ctx.me.email || "") + " · tier " + (ctx.me.tier || "") : "Signed out — live status needs a session.";
+  $("setup-status-line").textContent = !ctx.loaded ? "Checking session…" : ctx.signedIn ? "Signed in as " + (ctx.me.email || "") + " · tier " + (ctx.me.tier_label || ctx.me.tier || "") : "Signed out — live status needs a session.";
   if (moveFocus) {
     root.focus({ preventScroll: true });
     window.scrollTo(0, 0);

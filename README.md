@@ -26,7 +26,7 @@ pricing note from those flags (see "Honest state of this deployment" below).
 | --- | --- | --- | --- | --- |
 | Sandbox | 10 | 200 | 0 | shared sandbox estate (may be wiped) |
 | Operator | 60 | 5,000 | 49 | dedicated estate on Fly.io |
-| Sovereign | 300 | 50,000 | 249 | dedicated estate on Fly.io |
+| Estate | 300 | 50,000 | 249 | dedicated estate on Fly.io |
 
 The prices in `src/lib/tiers.ts` are display copy; what is actually billed is the Stripe Price
 referenced by `STRIPE_PRICE_OPERATOR` / `STRIPE_PRICE_SOVEREIGN`. Only the Stripe webhook writes
@@ -60,7 +60,7 @@ netlify dev
 | `STRIPE_SECRET_KEY` | For billing | Stripe secret key. Billing is configured only when all four `STRIPE_*` variables are set. |
 | `STRIPE_WEBHOOK_SECRET` | For billing | Signing secret of the `/api/billing/webhook` endpoint (`whsec_…`). |
 | `STRIPE_PRICE_OPERATOR` | For billing | Stripe Price id billed for Operator. |
-| `STRIPE_PRICE_SOVEREIGN` | For billing | Stripe Price id billed for Sovereign. |
+| `STRIPE_PRICE_SOVEREIGN` | For billing | Stripe Price id billed for Estate. |
 | `STRIPE_PRICE_OPERATOR_ACCEPTED` / `STRIPE_PRICE_SOVEREIGN_ACCEPTED` | No | Further Price ids (comma separated) that map to the tier, e.g. the old Price after a price change or another interval. Never used for Checkout. An id listed for both tiers (sale or accepted) maps to neither: billing stays on, one `ALERT price_config_shared` line is logged, `/api/health` shows `price_config_shared: true`, and Checkout answers `501` for a tier whose own sale Price is shared, until the variables are fixed. |
 | `FLY_API_TOKEN` | For provisioning | Org-scoped Fly token (apps, volumes, machines, IPs, secrets). Provisioning is configured only when this, `FLY_ORG_SLUG`, `FLY_ESTATE_IMAGE` and `ESTATE_SECRET_MASTER` are all set. |
 | `FLY_ORG_SLUG` | For provisioning | The Fly organization that owns customer estates. |

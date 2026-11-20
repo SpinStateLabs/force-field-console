@@ -115,7 +115,7 @@ function enterDashboard(me) {
   $("acct-email").textContent = me.email || "";
   const tierChip = $("acct-tier");
   tierChip.className = "chip chip-ok";
-  tierChip.textContent = me.tier || "";
+  tierChip.textContent = me.tier_label || me.tier || "";
 
   const lim = me.limits || {};
   const rpm = typeof lim.rpm === "number" ? lim.rpm : "?";
@@ -188,7 +188,8 @@ async function logout() {
 function renderBilling(me) {
   const tier = me.tier || "sandbox";
   const b = me.billing || null;
-  let summary = "Current plan: " + tier + ".";
+  const tierLabel = me.tier_label || tier;
+  let summary = "Current plan: " + tierLabel + ".";
   if (b && b.status) {
     summary += " Subscription " + b.status + ".";
     if (b.current_period_end) summary += " Current period ends " + fmtTime(b.current_period_end) + ".";
@@ -216,7 +217,7 @@ function renderBilling(me) {
   } else {
     show(upOp);
     show(upSov);
-    upSov.textContent = "Upgrade to Sovereign ($249/mo)";
+    upSov.textContent = "Upgrade to Estate ($249/mo)";
   }
   if (b && b.has_customer) show(manage); else hide(manage);
 }

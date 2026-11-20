@@ -11,5 +11,5 @@
 export const TIERS = {
   sandbox:   { label: "Sandbox",   rpm: 10,  rpd: 200,   price_usd_month: 0 },
   operator:  { label: "Operator",  rpm: 60,  rpd: 5000,  price_usd_month: 49 },
-  sovereign: { label: "Sovereign", rpm: 300, rpd: 50000, price_usd_month: 249 },
+  sovereign: { label: "Estate", rpm: 300, rpd: 50000, price_usd_month: 249 },
 } as const;

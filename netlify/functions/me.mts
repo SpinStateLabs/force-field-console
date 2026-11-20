@@ -31,6 +31,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     JSON.stringify({
       email: user.email,
       tier: user.tier,
+      tier_label: tier.label,
       created_at: user.created_at,
       limits: { rpm: tier.rpm, rpd: tier.rpd },
       billing: user.billing

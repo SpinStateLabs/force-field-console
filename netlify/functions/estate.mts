@@ -49,7 +49,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     return json(200, { estate: estate ? publicEstate(estate) : null, provisioning_configured: configured });
   }
 
-  if (!estate) return err(404, "no_estate", "No dedicated estate on this account; estates come with the Operator and Sovereign tiers.");
+  if (!estate) return err(404, "no_estate", "No dedicated estate on this account; estates come with the Operator and Estate tiers.");
 
   try {
     if (req.method === "POST" && pathname === "/api/estate/advance") {

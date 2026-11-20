@@ -1,6 +1,6 @@
 # Dedicated estate quickstart
 
-For Operator and Sovereign accounts whose dashboard shows the estate as **ready**. Everything below
+For Operator and Estate accounts whose dashboard shows the estate as **ready**. Everything below
 goes through the console gateway, `https://force-field-console.netlify.app/api/v1/<service>/...`, with
 your console API key in `x-api-key`. The gateway strips `/api/v1`, adds the estate's own perimeter
 secret, and forwards your `x-field-*` / `x-force-*` headers (never cookies, `Authorization`, or a
