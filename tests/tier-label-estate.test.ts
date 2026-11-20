@@ -5,6 +5,10 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { TIERS } from "../src/lib/tiers";
+import meHandler from "../netlify/functions/me.mts";
+import { freshStore } from "./helpers";
+import { createUser, saveUser } from "../src/lib/users";
+import { issueSession, sessionCookie } from "../src/lib/session";
 // @ts-ignore plain browser ES module shared with the page
 import { OVERVIEW, stepStatus } from "../public/setup-steps.js";
 
@@ -54,5 +58,47 @@ describe("top tier display label is Estate", () => {
 
   it("estate function's no-estate message names the Estate tier", () => {
     expect(read("netlify/functions/estate.mts")).toContain("estates come with the Operator and Estate tiers.");
+  });
+});
+
+// Review finding (r1): the raw id reached the screen in three places. /api/me now carries the
+// display label from TIERS, and every page that shows the tier renders that label, never the id.
+describe("the tier shown on screen is the label, not the id", () => {
+  it("/api/me returns tier_label Estate for a sovereign account (id unchanged)", async () => {
+    freshStore();
+    const u = await createUser("estate-label@example.test", "correct horse battery staple");
+    u.tier = "sovereign";
+    await saveUser(u);
+    const cookie = sessionCookie(await issueSession(u.id)).split(";")[0];
+    const res = await meHandler(new Request("http://portal.test/api/me", { headers: { cookie } }), {} as any);
+    const body = await res.json();
+    expect(body.tier).toBe("sovereign");
+    expect(body.tier_label).toBe("Estate");
+  });
+
+  it("/api/me tier_label comes from TIERS for every tier", async () => {
+    for (const t of ["sandbox", "operator", "sovereign"] as const) {
+      freshStore();
+      const u = await createUser(`label-${t}@example.test`, "correct horse battery staple");
+      u.tier = t;
+      await saveUser(u);
+      const cookie = sessionCookie(await issueSession(u.id)).split(";")[0];
+      const body = await (await meHandler(new Request("http://portal.test/api/me", { headers: { cookie } }), {} as any)).json();
+      expect(body.tier_label, t).toBe(TIERS[t].label);
+    }
+  });
+
+  it("dashboard chip and plan summary render tier_label, not the raw id", () => {
+    const js = read("public/app.js");
+    expect(js).not.toMatch(/tierChip\.textContent = me\.tier(?!_label)/);
+    expect(js).not.toMatch(/"Current plan: " \+ tier(?!Label)/);
+    expect(js).toMatch(/tierChip\.textContent = me\.tier_label/);
+    expect(js).toMatch(/"Current plan: " \+ (me\.tier_label|tierLabel)/);
+  });
+
+  it("setup status line renders tier_label, not the raw id", () => {
+    const js = read("public/setup.js");
+    expect(js).not.toMatch(/tier " \+ \(ctx\.me\.tier \|\|/);
+    expect(js).toMatch(/tier " \+ \(ctx\.me\.tier_label \|\|/);
   });
 });
