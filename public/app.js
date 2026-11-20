@@ -216,7 +216,7 @@ function renderBilling(me) {
   } else {
     show(upOp);
     show(upSov);
-    upSov.textContent = "Upgrade to Sovereign ($249/mo)";
+    upSov.textContent = "Upgrade to Estate ($249/mo)";
   }
   if (b && b.has_customer) show(manage); else hide(manage);
 }

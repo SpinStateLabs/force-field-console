@@ -338,7 +338,7 @@ export const OVERVIEW = {
   slug: "overview",
   title: "Dedicated-estate setup",
   intro: [
-    "For Operator and Sovereign accounts whose dashboard shows the estate as ready. Everything goes through the console gateway, https://force-field-console.netlify.app/api/v1/<service>/..., with your console API key in x-api-key.",
+    "For Operator and Estate accounts whose dashboard shows the estate as ready. Everything goes through the console gateway, https://force-field-console.netlify.app/api/v1/<service>/..., with your console API key in x-api-key.",
     "The gateway strips /api/v1, adds the estate's own perimeter secret, and forwards your x-field-* and x-force-* headers (never cookies, Authorization, or a caller-supplied x-field-auth). Responses are buffered; requests time out after 30 s.",
     "The estate is a Force-Field Protocol engine: thirteen services behind one origin, in the armed posture (per-event ledger signing required, served attestations signed, gateway enforcement with tool checks, and a delegation roster that gates every mint).",
   ],
@@ -386,7 +386,7 @@ export function stepStatus(statusKey, ctx) {
     return { kind: "info", label: "unknown", text: ctx.estateError || "Estate status could not be read just now." };
   }
   if (estate === null) {
-    return { kind: "warn", label: "no estate", text: "No dedicated estate on this account yet. Dedicated estates come with the Operator and Sovereign tiers; the record is created when Stripe confirms the subscription." };
+    return { kind: "warn", label: "no estate", text: "No dedicated estate on this account yet. Dedicated estates come with the Operator and Estate tiers; the record is created when Stripe confirms the subscription." };
   }
   if (statusKey === "boundaries") {
     const bits = [];
