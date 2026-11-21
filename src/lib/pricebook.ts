@@ -20,8 +20,8 @@ export const PRICE_BOOK = {
     /** [Don] minimum 3 seats; [record 2026-11-10] a pool of 20 agents per seat. Display label "Estate". */
     sovereign: { seat_month: 24, min_seats: 3, max_seats: null as number | null, agents_base: 0, agents_per_seat: 20 },
   },
-  /** [rec] contact sales (no self-serve checkout): 2x Estate, minimum 25 seats; pool sized by contract. */
-  enterprise: { seat_month: 48, min_seats: 25 },
+  /** [Don 2026-11-21] contact sales (no self-serve checkout): 32 per seat, minimum 25 seats; pool sized by contract. */
+  enterprise: { seat_month: 32, min_seats: 25 },
   /** [Don structure, rec numbers] top-up pack: +20 agents to the pool for the billing period, a second subscription item. */
   pack: { agents: 20, month: 12 },
 } as const;

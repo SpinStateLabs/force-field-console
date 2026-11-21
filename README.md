@@ -30,7 +30,7 @@ pricing note from those flags (see "Honest state of this deployment" below).
 | Sandbox (an account before it subscribes) | 10 | 200 | 0 | | shared sandbox estate (may be wiped) |
 | Operator | 60 | 5,000 | 24 | 1 to 2; up to 5 governed agents | dedicated estate on Fly.io |
 | Estate | 300 | 50,000 | 24 | at least 3; 20 governed agents per seat | dedicated estate on Fly.io |
-| Enterprise (contact sales) | | | 48 | at least 25 | by contract |
+| Enterprise (contact sales) | | | 32 | at least 25 | by contract |
 
 Every price, minimum, trial length and pack size is in ONE object, `src/lib/pricebook.ts` (the pages repeat
 those numbers as copy and `tests/pricing-per-seat.test.ts` fails when they drift). Annual billing is 10% off;
