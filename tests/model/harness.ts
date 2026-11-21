@@ -265,7 +265,7 @@ export class World {
   private emit(u: number, type: string, object: any) {
     const idx = this.events.length;
     const ev: Ev = { idx, id: `evt_${++this.evSeq}`, type, created: Math.floor(clock.now / 1000), payload: null, u, attempts: 0, delivered: false, lostAsDuplicate: false, givenUp: false, nextAt: clock.now, inFlight: false, firstAt: clock.now };
-    ev.payload = { id: ev.id, object: "event", type, created: ev.created, data: { object } };
+    ev.payload = { id: ev.id, object: "event", livemode: true, type, created: ev.created, data: { object } };
     this.events.push(ev);
     this.log(`stripe emits #${idx} ${ev.id} ${type} ${object.id ?? ""} ${object.status ?? ""} created=${ev.created}`);
   }

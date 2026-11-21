@@ -11,7 +11,7 @@ import { flyClientOrNull, flyConfig } from "../../src/lib/fly";
 import { advanceEstate, autoRetryFailedEstate, checkEstateHealth, provisionRetryDue, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
 import { userLockAgeMs } from "../../src/lib/locks";
 import { getUserById } from "../../src/lib/users";
-import { isGrantingUser, retryPendingSuspend } from "../../src/lib/billing";
+import { flyHeld, isGrantingUser, retryPendingSuspend } from "../../src/lib/billing";
 import { portalStore } from "../../src/lib/store";
 import { renewalDue } from "../../src/lib/renewal";
 import { kickWorker } from "../../src/lib/worker";
@@ -29,7 +29,8 @@ export default async (_req: Request): Promise<Response> => {
   const now = new Date();
   const estates = await listEstates();
   const stuckSuspends = estates.filter((e) => e.suspend_pending);
-  const pending = estates.filter((e) => (e.status === "provisioning" || e.status === "pending_manual") && !e.suspend_pending && !workerActive(e, now));
+  // A test-held record (Stripe test-mode grant) is never driven: no advance, no worker kick (review r1 C2).
+  const pending = estates.filter((e) => (e.status === "provisioning" || e.status === "pending_manual") && !e.test_hold && !e.suspend_pending && !workerActive(e, now));
   const due = estates.filter((e) => renewalDue(e, now) && !e.suspend_pending);
   const outcomes: Record<string, number> = {};
   const bump = (k: string) => { outcomes[k] = (outcomes[k] ?? 0) + 1; };
@@ -44,7 +45,8 @@ export default async (_req: Request): Promise<Response> => {
     await Promise.all(
       checkable.map(async (e) => {
         try {
-          if (!isGrantingUser(await getUserById(e.user_id))) return;
+          const owner = await getUserById(e.user_id);
+          if (!isGrantingUser(owner) || flyHeld(owner)) return; // a test-mode grant never starts a machine
           const m = await fly.getMachine(e.app, e.machine_id!, 8000);
           if (m && m.state === "stopped") {
             machineStopped += 1;
@@ -78,7 +80,7 @@ export default async (_req: Request): Promise<Response> => {
   for (const e of estates) {
     if (!e.suspend_pending && !e.resume_pending && e.status !== "suspended") continue;
     const u = await getUserById(e.user_id);
-    if (isGrantingUser(u)) {
+    if (isGrantingUser(u) && !flyHeld(u)) { // a held (test-mode) user is never resumed; its pending stop is still retried below
       if (e.resume_pending?.failed) failedResumes += 1;
       if (retryDue(e.resume_pending, now)) work.push(e);
     } else if (e.suspend_pending || e.resume_pending) {

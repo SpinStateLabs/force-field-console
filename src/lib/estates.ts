@@ -102,6 +102,11 @@ export type Estate = {
    * `next_retry_at` when the tick may retry it next (null: no automatic retry left or pending).
    */
   provision_retry?: ProvisionRetry | null;
+  /**
+   * Queued by a Stripe TEST-mode grant (src/lib/billing.ts provisioningAllowed): stays pending_manual and is never
+   * promoted to provisioning, even when Fly is configured, until a live-mode grant releases it. No Fly spend.
+   */
+  test_hold?: boolean;
   lease_until: string | null;
   worker_until: string | null;
   created_at: string;
@@ -193,6 +198,13 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
     if (cur && opts.onlyIf && !opts.onlyIf(cur)) return false;
     let out: Estate = e;
     if (cur) out = opts.owns ? mergeOwned(cur, e, opts.owns) : mergeSuspendWins(cur, e);
+    // test_hold changes ONLY through an owned write (holdForTestMode / releaseTestHold): a whole-record write from a
+    // copy read earlier keeps the STORED value, so a stale copy can neither bring back nor drop a hold (review r1 C2).
+    if (cur && !(opts.owns ?? []).includes("test_hold")) {
+      out = out === e ? { ...e } : out;
+      if (cur.test_hold) out.test_hold = cur.test_hold;
+      else out.test_hold = undefined;
+    }
     // No stored record: this write would CREATE one. A copy of a record that its owner released back to the
     // sandbox (src/lib/release.ts) must never bring it back: the released record's audit copy is its tombstone.
     if (!read && (await store.get(releasedEstateKey(e.user_id, e.created_at), { type: "json" }))) {
@@ -207,7 +219,21 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
   throw new EstateError(409, "estate_write_conflict", "The estate record kept changing underneath this write; try again.");
 }
 
-type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step" | "resume_pending";
+type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step" | "resume_pending" | "test_hold";
+
+/** A test-mode grant holds an existing, not-yet-running record (only that field is written; review r1 C1). */
+export async function holdForTestMode(e: Estate, now: Date = new Date()): Promise<Estate> {
+  e.test_hold = true;
+  await saveEstate(e, now, { owns: ["test_hold"] });
+  return (await getEstate(e.user_id)) ?? e;
+}
+
+/** A live-mode grant releases a test hold (only that field is written); the next driver then promotes the record. */
+export async function releaseTestHold(e: Estate, now: Date = new Date()): Promise<Estate> {
+  e.test_hold = undefined;
+  await saveEstate(e, now, { owns: ["test_hold"] });
+  return (await getEstate(e.user_id)) ?? e;
+}
 const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health", "resume_pending"];
 const OWN_PENDING: readonly OwnedField[] = ["suspend_pending", "health"];
 const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "resume_pending", "health"];
@@ -278,11 +304,16 @@ export function attestSigner(grantor: string): string {
   return `Force-Field estate key for ${grantor} (provisioned by Spin State Labs — standing attestation)`;
 }
 
-/** Create the estate record for a paying user, or return the existing one. */
-export async function queueEstate(user: User, now: Date = new Date()): Promise<Estate> {
+/**
+ * Create the estate record for a paying user, or return the existing one (unchanged). `testHold`: the grant came
+ * from a Stripe TEST-mode event without the opt-in; a NEW record is created as pending_manual with test_hold, which
+ * advanceEstate never promotes, so no Fly resource is created for it.
+ */
+export async function queueEstate(user: User, now: Date = new Date(), opts: { testHold?: boolean } = {}): Promise<Estate> {
   const existing = await getEstate(user.id);
   if (existing) return existing;
-  const configured = flyConfig() !== null;
+  const held = opts.testHold === true;
+  const configured = !held && flyConfig() !== null;
   const e: Estate = {
     user_id: user.id,
     app: newAppName(user.id),
@@ -317,7 +348,17 @@ export async function queueEstate(user: User, now: Date = new Date()): Promise<E
     ready_at: null,
     suspended_at: null,
   };
-  logEstate(e, "queue", configured ? "queued for automatic provisioning" : "queued; provisioning is not configured on this deployment (manual)", now);
+  if (held) e.test_hold = true;
+  logEstate(
+    e,
+    "queue",
+    held
+      ? "queued by a Stripe test-mode grant: held, no provisioning (STRIPE_TEST_MODE_PROVISIONING is not \"true\")"
+      : configured
+        ? "queued for automatic provisioning"
+        : "queued; provisioning is not configured on this deployment (manual)",
+    now,
+  );
   // Create-only write: a concurrent creator (a webhook redelivery, a racing
   // driver) cannot overwrite a record that already exists — its record wins.
   const store = await portalStore();
@@ -517,6 +558,9 @@ export async function advanceEstate(
   const fetchImpl = opts.fetchImpl ?? fetch;
   const cfg = flyConfig();
 
+  if (e.test_hold) {
+    return { estate: e, outcome: "idle", note: "held: queued by a Stripe test-mode grant; a live-mode grant releases it" };
+  }
   if (e.status === "pending_manual" && fly && cfg) {
     e.status = "provisioning";
     logEstate(e, "queue", "provisioning became configured; starting", now);
@@ -744,6 +788,7 @@ export function provisionRetryDue(e: Estate, now: Date): boolean {
  * retry, so a stale copy or a second driver cannot retry twice. True when the estate went back to provisioning.
  */
 export async function autoRetryFailedEstate(e: Estate, now: Date = new Date()): Promise<boolean> {
+  if (e.test_hold) return false; // held by a Stripe test-mode grant: never retried into provisioning
   if (!provisionRetryDue(e, now)) return false;
   const due = e.provision_retry!.next_retry_at;
   const count = e.provision_retry!.count + 1;

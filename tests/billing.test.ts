@@ -54,7 +54,7 @@ describe("stripe webhook state transitions", () => {
     const fetchImpl = async (url: string) =>
       url.endsWith("/v1/subscriptions/sub_1") ? jsonResponse(200, sub()) : jsonResponse(404, { error: { message: "no" } });
     const r = await handleStripeEvent(
-      { id: "evt_1", type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_1", customer: "cus_1", client_reference_id: user.id } } },
+      { id: "evt_1", livemode: true, type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_1", customer: "cus_1", client_reference_id: user.id } } },
       { cfg: stripeConfig()!, fly: null, fetchImpl },
     );
     expect(r.handled).toBe(true);
@@ -68,10 +68,10 @@ describe("stripe webhook state transitions", () => {
   });
 
   it("ignores non-subscription checkouts and sessions without a portal user", async () => {
-    const r1 = await handleStripeEvent({ id: "e", type: "checkout.session.completed", data: { object: { mode: "payment" } } }, { cfg: stripeConfig()!, fly: null });
+    const r1 = await handleStripeEvent({ id: "e", livemode: true, type: "checkout.session.completed", data: { object: { mode: "payment" } } }, { cfg: stripeConfig()!, fly: null });
     expect(r1.handled).toBe(false);
     const r2 = await handleStripeEvent(
-      { id: "e", type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_1", client_reference_id: "nobody" } } },
+      { id: "e", livemode: true, type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_1", client_reference_id: "nobody" } } },
       { cfg: stripeConfig()!, fly: null },
     );
     expect(r2.handled).toBe(false);
@@ -80,7 +80,7 @@ describe("stripe webhook state transitions", () => {
 
   it("an unknown price never grants a paid tier", async () => {
     const r = await handleStripeEvent(
-      { id: "e", type: "customer.subscription.updated", data: { object: sub({ items: { data: [{ price: { id: "price_mystery" } }] } }, user.id) } },
+      { id: "e", livemode: true, type: "customer.subscription.updated", data: { object: sub({ items: { data: [{ price: { id: "price_mystery" } }] } }, user.id) } },
       { cfg: stripeConfig()!, fly: null },
     );
     expect(r.handled).toBe(true);
@@ -97,7 +97,7 @@ describe("stripe webhook state transitions", () => {
     await saveEstate(e);
     const fly = new StopFly();
     const r = await handleStripeEvent(
-      { id: "e", type: "customer.subscription.deleted", data: { object: sub({ status: "canceled" }, user.id) } },
+      { id: "e", livemode: true, type: "customer.subscription.deleted", data: { object: sub({ status: "canceled" }, user.id) } },
       { cfg: stripeConfig()!, fly: fly as any },
     );
     expect(r.handled).toBe(true);
@@ -107,7 +107,7 @@ describe("stripe webhook state transitions", () => {
 
     // reactivation resumes it
     await handleStripeEvent(
-      { id: "e2", type: "customer.subscription.updated", data: { object: sub({ status: "active" }, user.id) } },
+      { id: "e2", livemode: true, type: "customer.subscription.updated", data: { object: sub({ status: "active" }, user.id) } },
       { cfg: stripeConfig()!, fly: fly as any },
     );
     expect((await getUserById(user.id))!.tier).toBe("operator");
@@ -118,16 +118,16 @@ describe("stripe webhook state transitions", () => {
   });
 
   it("past_due keeps the tier (Stripe's retry window); unpaid drops it", async () => {
-    await handleStripeEvent({ id: "a", type: "customer.subscription.updated", data: { object: sub({ status: "past_due" }, user.id) } }, { cfg: stripeConfig()!, fly: null });
+    await handleStripeEvent({ id: "a", livemode: true, type: "customer.subscription.updated", data: { object: sub({ status: "past_due" }, user.id) } }, { cfg: stripeConfig()!, fly: null });
     expect((await getUserById(user.id))!.tier).toBe("operator");
-    await handleStripeEvent({ id: "b", type: "customer.subscription.updated", data: { object: sub({ status: "unpaid" }, user.id) } }, { cfg: stripeConfig()!, fly: null });
+    await handleStripeEvent({ id: "b", livemode: true, type: "customer.subscription.updated", data: { object: sub({ status: "unpaid" }, user.id) } }, { cfg: stripeConfig()!, fly: null });
     expect((await getUserById(user.id))!.tier).toBe("sandbox");
   });
 
   it("finds the user by the customer pointer when the subscription carries no metadata", async () => {
-    await handleStripeEvent({ id: "a", type: "customer.subscription.created", data: { object: sub({}, user.id) } }, { cfg: stripeConfig()!, fly: null });
+    await handleStripeEvent({ id: "a", livemode: true, type: "customer.subscription.created", data: { object: sub({}, user.id) } }, { cfg: stripeConfig()!, fly: null });
     const r = await handleStripeEvent(
-      { id: "b", type: "customer.subscription.updated", data: { object: sub({ items: { data: [{ price: { id: "price_sov" } }] } }) } },
+      { id: "b", livemode: true, type: "customer.subscription.updated", data: { object: sub({ items: { data: [{ price: { id: "price_sov" } }] } }) } },
       { cfg: stripeConfig()!, fly: null },
     );
     expect(r.handled).toBe(true);
@@ -170,7 +170,7 @@ describe("billing endpoints", () => {
 
   it("webhook: rejects a bad signature, applies a good one once, and acknowledges the redelivery", async () => {
     Object.assign(process.env, STRIPE_ENV);
-    const raw = JSON.stringify({ id: "evt_42", type: "customer.subscription.updated", data: { object: sub({}, user.id) } });
+    const raw = JSON.stringify({ id: "evt_42", livemode: true, type: "customer.subscription.updated", data: { object: sub({}, user.id) } });
     const bad = await handler(new Request("http://portal.test/api/billing/webhook", { method: "POST", headers: { "stripe-signature": "t=1,v1=00" }, body: raw }), ctx);
     expect(bad.status).toBe(400);
     expect((await bad.json()).error.code).toBe("bad_signature");
@@ -189,7 +189,7 @@ describe("billing endpoints", () => {
 
   it("webhook: the event id is CLAIMED before handling (create-only write); a failed handling releases it so Stripe's retry applies", async () => {
     Object.assign(process.env, STRIPE_ENV);
-    const raw = JSON.stringify({ id: "evt_77", type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_1", customer: "cus_1", client_reference_id: user.id } } });
+    const raw = JSON.stringify({ id: "evt_77", livemode: true, type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_1", customer: "cus_1", client_reference_id: user.id } } });
     const sig = signPayload(raw, "whsec_test", Math.floor(Date.now() / 1000));
     const post = () => handler(new Request("http://portal.test/api/billing/webhook", { method: "POST", headers: { "stripe-signature": sig }, body: raw }), ctx);
     const realFetch = globalThis.fetch;
