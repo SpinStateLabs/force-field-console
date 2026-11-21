@@ -287,3 +287,19 @@ describe("r1 C3: a pending suspension is still retried for a held user", () => {
     expect(calls.some((c) => /start/i.test(c))).toBe(false);
   });
 });
+
+describe("r1b R1: the tick treats a held user's pending suspension like any other (backoff, failure count)", () => {
+  it("a failed suspension of a held user is counted as suspend_failed and not retried early", async () => {
+    const e = await queueEstate(user);
+    Object.assign(e, { status: "ready", machine_id: "m_1", step: "done" });
+    await saveEstate(e);
+    await apply(false);
+    const cur = (await getEstate(user.id))!;
+    cur.suspend_pending = { reason: "test", since: new Date().toISOString(), attempts: 10, last_error: "machine stop failed", next_retry_at: new Date(Date.now() + 3_600_000).toISOString(), failed: true };
+    await saveEstate(cur);
+    const body = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
+    expect(body.suspend_failed).toBe(1);
+    const flyCalls = fetchSpy.mock.calls.filter((c: any[]) => /api\.machines\.dev|api\.fly\.io/.test(String(c[0])));
+    expect(flyCalls).toEqual([]);
+  });
+});
