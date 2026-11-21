@@ -16,7 +16,9 @@ with path prefixes such as `/registry`, `/ledger`, `/delegation`, `/sentinel`, `
 `/governor`, `/replay`, `/gateway`, `/federation`, `/lifecycle`, `/attest`, `/crosswalk`).
 
 Every capability is **configuration-gated and reports itself honestly**: `/api/health` exposes
-`estate_attached`, `billing_configured` and `provisioning_configured`; an endpoint whose
+`estate_attached`, `billing_configured` and `provisioning_configured` (plus, since 0.2.3,
+`stripe_mode` = `test` | `live` | `null` from the Stripe key prefix only, and
+`test_mode_provisioning`, true only when `STRIPE_TEST_MODE_PROVISIONING` is exactly `true`); an endpoint whose
 configuration is absent answers `501` with a named error code, and the landing page renders its
 pricing note from those flags (see "Honest state of this deployment" below).
 
