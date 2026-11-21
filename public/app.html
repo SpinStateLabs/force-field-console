@@ -68,9 +68,13 @@
       <h2 class="panel-title">Plan &amp; billing</h2>
       <p id="billing-summary" class="muted">Loading&hellip;</p>
       <p id="billing-note" class="hint hidden"></p>
+      <p class="hint">
+        <label for="seat-count">Seats</label> <input id="seat-count" type="number" min="1" step="1" value="3">
+        <label for="annual-billing"><input id="annual-billing" type="checkbox"> Pay annually, 10% off (CA$21.60/seat/mo, billed yearly)</label>
+      </p>
       <div class="panel-actions">
-        <button id="upgrade-operator" class="btn btn-primary" type="button">Upgrade to Operator ($49/mo)</button>
-        <button id="upgrade-sovereign" class="btn btn-secondary" type="button">Upgrade to Estate ($249/mo)</button>
+        <button id="upgrade-operator" class="btn btn-primary" type="button">Upgrade to Operator (CA$24/seat/mo, 1-2 seats)</button>
+        <button id="upgrade-sovereign" class="btn btn-secondary" type="button">Upgrade to Estate (CA$24/seat/mo, min 3 seats)</button>
         <button id="manage-billing" class="btn btn-secondary hidden" type="button">Manage billing</button>
       </div>
       <div id="billing-error" class="error-box hidden" role="alert"></div>

@@ -40,13 +40,13 @@ describe("top tier display label is Estate", () => {
 
   it("landing page pricing card is named Estate and still upgrades the sovereign id", () => {
     const html = read("public/index.html");
-    expect(html).toMatch(/<h3 class="tier-name">Estate<\/h3>\s*<p class="tier-price">\$249/);
+    expect(html).toMatch(/<h3 class="tier-name">Estate<\/h3>\s*<p class="tier-price">CA\$24<span class="per">\/seat\/mo/);
     expect(html).toContain('href="app.html?upgrade=sovereign" data-upgrade="sovereign"');
   });
 
   it("dashboard upgrade button reads Upgrade to Estate", () => {
-    expect(read("public/app.html")).toContain('<button id="upgrade-sovereign" class="btn btn-secondary" type="button">Upgrade to Estate ($249/mo)</button>');
-    expect(read("public/app.js")).toContain('upSov.textContent = "Upgrade to Estate ($249/mo)";');
+    expect(read("public/app.html")).toContain('<button id="upgrade-sovereign" class="btn btn-secondary" type="button">Upgrade to Estate (CA$24/seat/mo, min 3 seats)</button>');
+    expect(read("public/app.js")).toContain('upSov.textContent = "Upgrade to Estate (CA$24/seat/mo, min 3 seats)";');
     expect(read("public/app.js")).toContain('startCheckout("sovereign", ev.currentTarget)');
   });
 

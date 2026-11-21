@@ -13,12 +13,14 @@ import {
   StripeError,
   createCheckoutSession,
   createPortalSession,
+  salePrice,
   stripeConfig,
   tierForPrice,
   verifyStripeSignature,
 } from "../../src/lib/stripe";
 import { checkoutIdempotencyKey, claimCheckout, claimEvent, eventDone, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
 import { flyClientOrNull } from "../../src/lib/fly";
+import { PRICE_BOOK, seatBounds } from "../../src/lib/pricebook";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -105,9 +107,26 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       if (tier !== "operator" && tier !== "sovereign") {
         return err(400, "bad_tier", "tier must be \"operator\" or \"sovereign\".");
       }
-      // A sale price that is also configured for the other tier maps to no tier: selling it would take money and
+      // Billing interval: "month" (default, also when absent) or "year" (annual, 10% off). Anything else is refused.
+      const interval = body?.interval === undefined ? "month" : body.interval;
+      if (interval !== "month" && interval !== "year") {
+        return err(400, "bad_interval", "interval must be \"month\" or \"year\".");
+      }
+      // Seats: an integer within the tier's bounds (src/lib/pricebook.ts); absent = the tier's minimum. Enforced here,
+      // server side, whatever the page sent.
+      const bounds = seatBounds(tier);
+      const seats = body?.seats === undefined ? bounds.min : body.seats;
+      if (!Number.isInteger(seats) || seats < bounds.min || (bounds.max !== null && seats > bounds.max)) {
+        const range = bounds.max === null ? `at least ${bounds.min}` : `${bounds.min} to ${bounds.max}`;
+        return err(400, "bad_seats", `seats must be a whole number, ${range} for this plan.`);
+      }
+      const price = salePrice(cfg, tier, interval);
+      if (!price) {
+        return err(501, "annual_not_configured", "Annual billing is not configured on this deployment yet; choose monthly.");
+      }
+      // A sale price that is also configured for another purpose maps to no tier: selling it would take money and
       // grant nothing. Refuse that tier until STRIPE_PRICE_* is fixed (ALERT price_config_shared is in the log).
-      if (tierForPrice(cfg, cfg.prices[tier as "operator" | "sovereign"]) !== tier) {
+      if (tierForPrice(cfg, price) !== tier) {
         return err(501, "billing_not_configured", NOT_CONFIGURED);
       }
       if (user.billing?.subscription_id && GRANTING_STATUSES.has(user.billing.status)) {
@@ -127,7 +146,12 @@ export default async (req: Request, _context: Context): Promise<Response> => {
           tier,
           success_url: origin + "/app.html?checkout=success",
           cancel_url: origin + "/app.html?checkout=cancelled",
-          idempotency_key: checkoutIdempotencyKey(user.id, tier, user.billing?.customer_id ?? null),
+          seats,
+          interval,
+          idempotency_key: checkoutIdempotencyKey(user.id, tier, user.billing?.customer_id ?? null, new Date(), interval, seats),
+          // The free trial is for a FIRST subscription only: an account that already has a Stripe customer
+          // (an earlier subscription, cancelled or not) gets none.
+          trial_days: user.billing?.customer_id ? 0 : PRICE_BOOK.trial_days,
         });
         return json(200, { url: session.url });
       } catch (e) {
