@@ -8,7 +8,6 @@ import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { PRICE_BOOK } from "../src/lib/pricebook";
-import { packsIdempotencyKey } from "../src/lib/billing";
 
 const ctx = {} as any;
 const STRIPE_ENV = {
@@ -81,7 +80,7 @@ describe("setting the number of packs", () => {
     expect(w[0].params.get("price")).toBe("price_pack");
     expect(w[0].params.get("quantity")).toBe("2");
     expect(w[0].params.get("proration_behavior")).toBe("create_prorations");
-    expect(w[0].key).toBe(packsIdempotencyKey(user.id, "sub_1", 2, new Date()));
+    expect(w[0].key).toMatch(/^packs-[0-9a-f-]{36}$/); // one key per request (review r1 C1)
   });
 
   it("an annual subscription uses the annual pack price", async () => {
@@ -175,5 +174,84 @@ describe("dashboard and README", () => {
     expect(js).toContain('api("/api/billing/packs", { method: "POST", body: { packs: Number($("pack-count").value) } })');
     expect(js).toContain('$("update-packs").addEventListener("click", updatePacks);');
     expect(readFileSync(join(root, "README.md"), "utf8")).toContain("`POST /api/billing/packs {packs}`");
+  });
+});
+
+// Review r1 (don.reviewer, PR 26 @ 082995d): findings (a)-(d), C2 route registration, DELETE body, copy vs PRICE_BOOK.
+describe("review r1 fixes", () => {
+  it("(a) a pack item on the OTHER interval than the subscription: 409 pack_items_ambiguous, no write", async () => {
+    await subscribed("active", [item("si_seat", "price_sov", 3), item("si_pack_y", "price_pack_y", 1)]);
+    const r = await post({ packs: 2 });
+    expect(r.status).toBe(409);
+    expect((await r.json()).error.code).toBe("pack_items_ambiguous");
+    expect(writes()).toEqual([]);
+  });
+
+  it("(b) two pack items: 409 pack_items_ambiguous, no write", async () => {
+    await subscribed("active", [item("si_seat", "price_sov", 3), item("si_p1", "price_pack", 1), item("si_p2", "price_pack", 2)]);
+    const r = await post({ packs: 4 });
+    expect(r.status).toBe(409);
+    expect((await r.json()).error.code).toBe("pack_items_ambiguous");
+    expect(writes()).toEqual([]);
+  });
+
+  it("(c) 2 -> 0 -> 2 within one minute: every write carries its own idempotency key", async () => {
+    await subscribed();
+    expect((await post({ packs: 2 })).status).toBe(200);
+    await subscribed("active", [item("si_seat", "price_sov", 3), item("si_new", "price_pack", 2)]);
+    expect((await post({ packs: 0 })).status).toBe(200);
+    await subscribed();
+    expect((await post({ packs: 2 })).status).toBe(200);
+    const keys = writes().map((w) => w.key);
+    expect(keys).toHaveLength(3);
+    expect(keys.every((k) => typeof k === "string" && k.length > 10)).toBe(true);
+    expect(new Set(keys).size).toBe(3);
+  });
+
+  it("(d) concurrent first purchases: one write; the other gets 409 packs_in_progress", async () => {
+    await subscribed();
+    const [r1, r2] = await Promise.all([post({ packs: 2 }), post({ packs: 3 })]);
+    expect([r1.status, r2.status].sort()).toEqual([200, 409]);
+    const loser = r1.status === 409 ? r1 : r2;
+    expect((await loser.json()).error.code).toBe("packs_in_progress");
+    expect(writes().filter((w) => w.path === "/v1/subscription_items")).toHaveLength(1);
+  });
+
+  it("(d) the claim is released after the write: a later change goes through", async () => {
+    await subscribed();
+    expect((await post({ packs: 2 })).status).toBe(200);
+    await subscribed("active", [item("si_seat", "price_sov", 3), item("si_new", "price_pack", 2)]);
+    expect((await post({ packs: 5 })).status).toBe(200);
+  });
+
+  it("(d) the claim is released when Stripe refuses the write", async () => {
+    await subscribed();
+    const ok = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(init?.method ?? "GET").toUpperCase() !== "GET") return new Response(JSON.stringify({ error: { message: "nope" } }), { status: 400, headers: { "content-type": "application/json" } });
+      return (ok as any)(input, init);
+    }) as any;
+    expect((await post({ packs: 2 })).status).toBe(502);
+    globalThis.fetch = ok;
+    expect((await post({ packs: 2 })).status).toBe(200);
+  });
+
+  it("C2: the route is registered", async () => {
+    const mod = await import("../netlify/functions/billing.mts");
+    expect((mod.config as any).path).toContain("/api/billing/packs");
+  });
+
+  it("DELETE carries proration_behavior in its body", async () => {
+    await subscribed("active", [item("si_seat", "price_sov", 3), item("si_pack", "price_pack", 2)]);
+    expect((await post({ packs: 0 })).status).toBe(200);
+    expect(writes()[0].params.get("proration_behavior")).toBe("create_prorations");
+  });
+
+  it("copy follows PRICE_BOOK (max packs and pack price)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const html = readFileSync(join(__dirname, "..", "public/app.html"), "utf8");
+    expect(html).toContain(`max="${PRICE_BOOK.pack.max_packs}"`);
+    expect(html).toContain(`(+${PRICE_BOOK.pack.agents} agents for CA$${PRICE_BOOK.pack.month}/mo each)`);
   });
 });

@@ -487,12 +487,34 @@ export function checkoutIdempotencyKey(
 }
 
 /**
- * Stripe Idempotency-Key for a pack change: one target count on one subscription within one claim-TTL bucket, so a
- * retried request replays the same subscription-item write instead of applying it twice.
+ * Stripe Idempotency-Key for ONE pack-change request (review r1 C1). A key derived from (user, subscription, count,
+ * minute) collided on 2 -> 0 -> 2: Stripe replayed the first create, nothing was created, and the API still said
+ * "changed". A repeat is made harmless instead by the endpoint itself: it sets an ABSOLUTE count from a fresh read of
+ * the live subscription (a retry after a write that landed finds the item and writes nothing), and a per-user claim
+ * (claimPacks) serialises concurrent requests.
  */
-export function packsIdempotencyKey(userId: string, subscriptionId: string, packs: number, now: Date = new Date()): string {
-  const bucket = Math.floor(now.getTime() / CHECKOUT_CLAIM_TTL_MS);
-  return "packs-" + createHash("sha256").update(`${userId}|${subscriptionId}|${packs}|${bucket}`).digest("hex").slice(0, 32);
+export function newPacksIdempotencyKey(): string {
+  return "packs-" + randomUUID();
+}
+
+/** Short claim serialising pack changes of ONE user (review r1 C3); released right after the write, success or not. */
+export const PACKS_CLAIM_TTL_MS = 60_000;
+export async function claimPacks(userId: string, now: Date = new Date()): Promise<string | null> {
+  const store = await portalStore();
+  const key = "pack_claims/" + userId;
+  const token = randomUUID();
+  const claim = { token, expires_at: new Date(now.getTime() + PACKS_CLAIM_TTL_MS).toISOString() };
+  if (await store.setJSONIfNew(key, claim)) return token;
+  const read = await store.getWithEtag(key);
+  if (!read) return (await store.setJSONIfNew(key, claim)) ? token : null;
+  if (new Date(read.data?.expires_at ?? 0).getTime() > now.getTime()) return null;
+  return (await store.setJSONIfMatch(key, claim, read.etag)) ? token : null;
+}
+export async function releasePacks(userId: string, token: string): Promise<void> {
+  const store = await portalStore();
+  const key = "pack_claims/" + userId;
+  const read = await store.getWithEtag(key);
+  if (read?.data?.token === token) await store.delete(key);
 }
 
 const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s, deps.cfg)) !== null && GRANTING_STATUSES.has(s.status);
