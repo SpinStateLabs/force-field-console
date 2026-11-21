@@ -55,6 +55,13 @@ describe("health exposes the test-mode guard state", () => {
     expect((await health()).body.stripe_mode).toBeNull();
   });
 
+  it("the prefix must start the key and end in an underscore (review H1)", async () => {
+    for (const key of [" sk_test_x", "sk_test", "xsk_live_y", "sk_testx_y"]) {
+      Object.assign(process.env, STRIPE_ENV, { STRIPE_SECRET_KEY: key });
+      expect((await health()).body.stripe_mode).toBeNull();
+    }
+  });
+
   it("test_mode_provisioning is true only for the exact opt-in value", async () => {
     Object.assign(process.env, STRIPE_ENV);
     for (const [v, want] of [["true", true], ["TRUE", false], ["1", false], ["", false]] as const) {
