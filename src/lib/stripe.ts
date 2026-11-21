@@ -149,6 +149,11 @@ export type CheckoutArgs = {
   cancel_url: string;
   /** Stripe Idempotency-Key for the session creation (derived from the checkout claim token). */
   idempotency_key?: string;
+  /**
+   * Free trial days (a first subscription only; the caller decides). With a trial, no card is required up front and
+   * a trial that ends without a payment method CANCELS instead of billing. 0 / absent: no trial, card collected.
+   */
+  trial_days?: number;
 };
 
 /** Create a subscription Checkout Session; returns its hosted URL. */
@@ -171,6 +176,12 @@ export async function createCheckoutSession(
   };
   if (args.customer_id) params.customer = args.customer_id;
   else params.customer_email = args.email;
+  const trialDays = Number.isInteger(args.trial_days) && (args.trial_days as number) > 0 ? (args.trial_days as number) : 0;
+  if (trialDays > 0) {
+    params["subscription_data[trial_period_days]"] = trialDays;
+    params.payment_method_collection = "if_required";
+    params["subscription_data[trial_settings][end_behavior][missing_payment_method]"] = "cancel";
+  }
   const session = await stripeRequest(cfg, "POST", "/v1/checkout/sessions", params, fetchImpl, args.idempotency_key);
   if (!session?.url || !session?.id) {
     throw new StripeError(502, "stripe_bad_response", "Stripe returned a Checkout Session without a URL.");

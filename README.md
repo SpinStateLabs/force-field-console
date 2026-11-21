@@ -22,7 +22,7 @@ pricing note from those flags (see "Honest state of this deployment" below).
 
 ## Tiers
 
-| Tier | Requests/min | Requests/day | Price (USD/mo) | Estate |
+| Tier | Requests/min | Requests/day | Price (CAD/mo) | Estate |
 | --- | --- | --- | --- | --- |
 | Sandbox | 10 | 200 | 0 | shared sandbox estate (may be wiped) |
 | Operator | 60 | 5,000 | 49 | dedicated estate on Fly.io |
@@ -32,6 +32,12 @@ The prices in `src/lib/tiers.ts` are display copy; what is actually billed is th
 referenced by `STRIPE_PRICE_OPERATOR` / `STRIPE_PRICE_SOVEREIGN`. Only the Stripe webhook writes
 a paid tier: a subscription in a granting status (`active`, `trialing`, `past_due`) with a known
 price sets the tier; anything else drops the account to Sandbox.
+
+Paid tiers are 60 days free on a customer's first subscription (`TRIAL_DAYS`): Checkout sends
+`subscription_data[trial_period_days]=60`, `payment_method_collection=if_required` (no card up
+front) and `trial_settings.end_behavior.missing_payment_method=cancel`, so billing starts on day 61
+only if the customer adds a payment method. An account that already has a Stripe customer gets no
+second trial. A `trialing` subscription grants the tier (and, in live mode, a dedicated estate).
 
 ## Local development
 
