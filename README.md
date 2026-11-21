@@ -145,6 +145,11 @@ the dashboard retry or an operator moves it; a missing app or machine is flagged
   the tier's Price, `client_reference_id` = user id, metadata on the session and the
   subscription) and returns its URL. An account with a granting subscription gets
   `409 already_subscribed` (plan changes go through the portal).
+- `POST /api/billing/packs {packs}` sets the number of top-up packs (+20 agents each; 0 to
+  `PRICE_BOOK.pack.max_packs`) on the CURRENT subscription as a second item on the pack Price of the
+  subscription's own interval, prorated. The live subscription must be `active` (not trialing, not past_due):
+  `409 subscription_not_active`; `501 packs_not_configured` without the pack Price for that interval. The webhook
+  then records the new pack count and agent pool.
 - `POST /api/billing/portal` returns a Customer Portal session URL (plan switch, payment
   method, cancel).
 - `POST /api/billing/webhook` verifies `Stripe-Signature` by hand (HMAC-SHA256 of

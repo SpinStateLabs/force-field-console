@@ -486,6 +486,15 @@ export function checkoutIdempotencyKey(
   return "checkout-" + createHash("sha256").update(`${userId}|${tier}|${interval}|${seats}|${customerId ?? ""}|${bucket}`).digest("hex").slice(0, 32);
 }
 
+/**
+ * Stripe Idempotency-Key for a pack change: one target count on one subscription within one claim-TTL bucket, so a
+ * retried request replays the same subscription-item write instead of applying it twice.
+ */
+export function packsIdempotencyKey(userId: string, subscriptionId: string, packs: number, now: Date = new Date()): string {
+  const bucket = Math.floor(now.getTime() / CHECKOUT_CLAIM_TTL_MS);
+  return "packs-" + createHash("sha256").update(`${userId}|${subscriptionId}|${packs}|${bucket}`).digest("hex").slice(0, 32);
+}
+
 const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s, deps.cfg)) !== null && GRANTING_STATUSES.has(s.status);
 
 /**

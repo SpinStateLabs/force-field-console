@@ -13,12 +13,15 @@ import {
   StripeError,
   createCheckoutSession,
   createPortalSession,
+  getSubscription,
+  packPriceIds,
   salePrice,
   stripeConfig,
+  stripeRequest,
   tierForPrice,
   verifyStripeSignature,
 } from "../../src/lib/stripe";
-import { checkoutIdempotencyKey, claimCheckout, claimEvent, eventDone, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
+import { checkoutIdempotencyKey, packsIdempotencyKey, claimCheckout, claimEvent, eventDone, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
 import { flyClientOrNull } from "../../src/lib/fly";
 import { PRICE_BOOK, seatBounds } from "../../src/lib/pricebook";
 
@@ -161,6 +164,50 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       }
     }
 
+    if (pathname === "/api/billing/packs") {
+      // Top-up packs (price book rev 2): set the number of +20-agent packs on the CURRENT subscription; 0 removes them.
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return err(400, "bad_json", "Request body must be valid JSON.");
+      }
+      const packs = body?.packs;
+      if (!Number.isInteger(packs) || packs < 0 || packs > PRICE_BOOK.pack.max_packs) {
+        return err(400, "bad_packs", `packs must be a whole number from 0 to ${PRICE_BOOK.pack.max_packs}.`);
+      }
+      const subId = user.billing?.subscription_id;
+      if (!subId) return err(409, "no_subscription", "Subscribe to a plan before adding top-up packs.");
+      // The LIVE subscription decides (the mirror can lag): only an active, paid subscription buys packs. A trial gets
+      // no free agents; past_due and later states buy nothing.
+      const sub = await getSubscription(cfg, subId);
+      if (sub.status !== "active") {
+        return err(409, "subscription_not_active", "Top-up packs can be added to an active, paid subscription only (not during the free trial).");
+      }
+      const items = sub.items?.data ?? [];
+      const tierItem = items.find((i) => tierForPrice(cfg, i.price?.id) !== null);
+      const tier = tierItem ? tierForPrice(cfg, tierItem.price?.id)! : null;
+      const annual = tier !== null && cfg.annual?.[tier] !== undefined && tierItem?.price?.id === cfg.annual[tier];
+      const packPrice = annual ? cfg.pack?.year : cfg.pack?.month;
+      if (!tier || !packPrice) {
+        return err(501, "packs_not_configured", "Top-up packs are not configured for this subscription's billing interval yet.");
+      }
+      const packIds = new Set(packPriceIds(cfg));
+      const existing = items.find((i: any) => i.price?.id && packIds.has(i.price.id)) as any;
+      const current = existing ? (Number.isInteger(existing.quantity) ? existing.quantity : 1) : 0;
+      if (packs === current) return json(200, { packs, changed: false });
+      const key = packsIdempotencyKey(user.id, sub.id, packs, new Date());
+      if (existing && packs > 0) {
+        await stripeRequest(cfg, "POST", "/v1/subscription_items/" + encodeURIComponent(existing.id), { quantity: packs, proration_behavior: "create_prorations" }, fetch, key);
+      } else if (existing) {
+        await stripeRequest(cfg, "DELETE", "/v1/subscription_items/" + encodeURIComponent(existing.id), { proration_behavior: "create_prorations" }, fetch, key);
+      } else {
+        await stripeRequest(cfg, "POST", "/v1/subscription_items", { subscription: sub.id, price: packPrice, quantity: packs, proration_behavior: "create_prorations" }, fetch, key);
+      }
+      // The webhook (customer.subscription.updated) records the new pack count and agent pool on the account.
+      return json(200, { packs, changed: true });
+    }
+
     if (pathname === "/api/billing/portal") {
       if (!user.billing?.customer_id) {
         return err(404, "no_billing_account", "No billing account yet; start a subscription first.");
@@ -179,5 +226,5 @@ export default async (req: Request, _context: Context): Promise<Response> => {
 };
 
 export const config: Config = {
-  path: ["/api/billing/checkout", "/api/billing/portal", "/api/billing/webhook"],
+  path: ["/api/billing/checkout", "/api/billing/portal", "/api/billing/packs", "/api/billing/webhook"],
 };

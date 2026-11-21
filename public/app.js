@@ -252,6 +252,20 @@ async function openBillingPortal() {
   setError($("billing-error"), errMessage(res.status, res.data));
 }
 
+// Top-up packs: the server checks the count and that the subscription is active and paid (not in the trial).
+async function updatePacks() {
+  const btn = $("update-packs");
+  btn.disabled = true;
+  setError($("billing-error"), "");
+  const res = await api("/api/billing/packs", { method: "POST", body: { packs: Number($("pack-count").value) } });
+  btn.disabled = false;
+  if (res.status === 200) {
+    window.location.reload(); // the webhook records the new pack count; the summary reloads from /api/me
+    return;
+  }
+  setError($("billing-error"), errMessage(res.status, res.data));
+}
+
 // After Stripe redirects back: the tier changes when the webhook lands, so
 // poll /api/me for a short while instead of pretending the upgrade happened.
 function handleReturnParams() {
@@ -765,6 +779,7 @@ $("key-modal-close").addEventListener("click", closeKeyModal);
 $("upgrade-operator").addEventListener("click", (ev) => startCheckout("operator", ev.currentTarget));
 $("upgrade-sovereign").addEventListener("click", (ev) => startCheckout("sovereign", ev.currentTarget));
 $("manage-billing").addEventListener("click", openBillingPortal);
+$("update-packs").addEventListener("click", updatePacks);
 $("estate-retry").addEventListener("click", retryEstate);
 $("estate-release-btn").addEventListener("click", askReleaseEstate);
 $("estate-release-no").addEventListener("click", cancelReleaseEstate);
