@@ -14,12 +14,15 @@ export const SUB_LOCK_TTL_MS = 5 * 60_000;
 export const SUB_LOCK_TRIES = 30;
 export const SUB_LOCK_WAIT_MS = 100;
 
-async function withLock<T>(key: string, label: string, fn: () => Promise<T>): Promise<T> {
+/** A held lock could not be taken within SUB_LOCK_TRIES x SUB_LOCK_WAIT_MS. */
+export class LockBusyError extends Error {}
+
+async function withLock<T>(key: string, label: string, fn: () => Promise<T>, ttlMs: number = SUB_LOCK_TTL_MS): Promise<T> {
   const store = await portalStore();
   const token = randomUUID();
   for (let i = 0; i < SUB_LOCK_TRIES; i++) {
     const now = Date.now();
-    const lock = { token, expires_at: new Date(now + SUB_LOCK_TTL_MS).toISOString() };
+    const lock = { token, expires_at: new Date(now + ttlMs).toISOString() };
     let got = await store.setJSONIfNew(key, lock);
     if (!got) {
       const read = await store.getWithEtag(key);
@@ -36,7 +39,15 @@ async function withLock<T>(key: string, label: string, fn: () => Promise<T>): Pr
     }
     await new Promise((r) => setTimeout(r, SUB_LOCK_WAIT_MS));
   }
-  throw new Error(label + " is busy; the event will be redelivered");
+  throw new LockBusyError(label + " is busy; the event will be redelivered");
+}
+
+/** Agent-pool lock: serialises count-then-register for ONE account so concurrent registrations cannot overshoot its
+ * pool. Separate from the user lock (a registration never blocks the billing webhook). Its TTL is just above the
+ * gateway's upstream budget (count 15 s + forward 30 s), so a killed request frees it within a minute. */
+export const AGENT_POOL_LOCK_TTL_MS = 60_000;
+export function withAgentPoolLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  return withLock("agent_pool_locks/" + userId, "agent pool of " + userId, fn, AGENT_POOL_LOCK_TTL_MS);
 }
 
 export function withUserLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
