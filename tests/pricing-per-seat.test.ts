@@ -51,7 +51,7 @@ describe("price book (one config object)", () => {
   it("seat bounds and the agent pool", () => {
     expect(seatBounds("operator")).toEqual({ min: 1, max: 2 });
     expect(seatBounds("sovereign")).toEqual({ min: 3, max: null });
-    expect(agentPool("operator", 2, 0)).toBe(5);
+    expect(agentPool("operator", 2, 0)).toBe(10); // rev 4 change 1: 5 per seat
     expect(agentPool("operator", 1, 1)).toBe(25);
     expect(agentPool("sovereign", 3, 0)).toBe(60);
     expect(agentPool("sovereign", 4, 2)).toBe(120);

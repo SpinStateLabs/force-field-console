@@ -28,13 +28,15 @@ pricing note from those flags (see "Honest state of this deployment" below).
 | --- | --- | --- | --- | --- | --- |
 | Open source | | | free | | run it yourself (the pricing page links to the install instructions) |
 | Sandbox (an account before it subscribes) | 10 | 200 | 0 | | shared sandbox estate (may be wiped) |
-| Operator | 60 | 5,000 | 24 | 1 to 2; up to 5 governed agents | dedicated estate on Fly.io |
+| Operator | 60 | 5,000 | 24 | 1 to 2; 5 governed agents per seat | dedicated estate on Fly.io |
 | Estate | 300 | 50,000 | 24 | at least 3; 20 governed agents per seat | dedicated estate on Fly.io |
 | Enterprise (contact sales) | | | 32 | at least 25 | by contract |
 
 Every price, minimum, trial length and pack size is in ONE object, `src/lib/pricebook.ts` (the pages repeat
 those numbers as copy and `tests/pricing-per-seat.test.ts` fails when they drift). Annual billing is 10% off;
-top-up packs add 20 agents to the pool for CAD 12 per month each, as a second subscription item. What is
+top-up packs add 20 agents to the pool for CAD 12 per month each, at most one per seat (the packs endpoint refuses
+more; packs beyond the seats after a portal seat reduction do not count and are flagged `packs_over_seats`), as a
+second subscription item. What is
 actually billed is the per-seat Stripe Price referenced by `STRIPE_PRICE_OPERATOR` / `STRIPE_PRICE_SOVEREIGN`
 (annual: `*_ANNUAL`), sold with quantity = seats. Checkout enforces the seat bounds server side (`400 bad_seats`),
 gives a 30-day trial on a first subscription (no card up front; it cancels at the end without one), and takes
