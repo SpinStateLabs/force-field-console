@@ -23,7 +23,7 @@ import {
   type StripeConfig,
   type StripeSubscription,
 } from "./stripe";
-import { getEstate, markResumePending, queueEstate, recordResumeFailure, recordReverifyFailure, releaseTestHold, resumeEstate, reverifyBackoffUntil, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
+import { getEstate, holdForTestMode, markResumePending, queueEstate, recordResumeFailure, recordReverifyFailure, releaseTestHold, resumeEstate, reverifyBackoffUntil, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 
 export type WebhookDeps = {
@@ -355,8 +355,13 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   //    timeout. If the function limit cuts it off, the state is a retryable suspend_pending, never lost.
   if (granting && deps.provision !== true) {
     // Stripe test mode (or an event without a boolean livemode) and no opt-in: record the estate as held and make
-    // no Fly call; an existing estate is left exactly as it is (never resumed or started from a test event).
-    await queueEstate(user, now, { testHold: true });
+    // no Fly call. A NEW record is created held. An EXISTING record that is not yet running (pending_manual,
+    // provisioning, error) is held too (review r1 C1), so no driver creates anything more for it; a ready or
+    // suspended estate is never resumed or started from a test event (its maintenance is unchanged).
+    const estate = await queueEstate(user, now, { testHold: true });
+    if (!estate.test_hold && (estate.status === "pending_manual" || estate.status === "provisioning" || estate.status === "error")) {
+      await holdForTestMode(estate, now);
+    }
   } else if (granting) {
     let estate = await queueEstate(user, now);
     if (estate.test_hold) estate = await releaseTestHold(estate, now);
@@ -402,9 +407,10 @@ export async function retryPendingSuspend(
     const fresh = await getEstate(userId);
     if (!fresh || (!fresh.suspend_pending && !fresh.resume_pending && fresh.status !== "suspended")) return { outcome: "cleared" as const, estate: fresh };
     const u = await getUserById(userId);
-    // A grant from a held test-mode event never starts or resumes a machine; nothing to do until a live grant.
-    if (isGrantingUser(u) && flyHeld(u)) return { outcome: "cleared" as const, estate: fresh };
-    if (isGrantingUser(u)) {
+    // A grant from a held test-mode event never starts or resumes a machine; nothing to do until a live grant. A
+    // suspension still pending for that estate is NOT skipped (review r1 C3): it falls through to the stop below.
+    if (isGrantingUser(u) && flyHeld(u) && !fresh.suspend_pending) return { outcome: "cleared" as const, estate: fresh };
+    if (isGrantingUser(u) && !flyHeld(u)) {
       try {
         if (fresh.status === "suspended") await resumeEstate(fresh, fly, now);
         else await reviveEstate(fresh, fly, now);

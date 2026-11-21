@@ -198,6 +198,13 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
     if (cur && opts.onlyIf && !opts.onlyIf(cur)) return false;
     let out: Estate = e;
     if (cur) out = opts.owns ? mergeOwned(cur, e, opts.owns) : mergeSuspendWins(cur, e);
+    // test_hold changes ONLY through an owned write (holdForTestMode / releaseTestHold): a whole-record write from a
+    // copy read earlier keeps the STORED value, so a stale copy can neither bring back nor drop a hold (review r1 C2).
+    if (cur && !(opts.owns ?? []).includes("test_hold")) {
+      out = out === e ? { ...e } : out;
+      if (cur.test_hold) out.test_hold = cur.test_hold;
+      else out.test_hold = undefined;
+    }
     // No stored record: this write would CREATE one. A copy of a record that its owner released back to the
     // sandbox (src/lib/release.ts) must never bring it back: the released record's audit copy is its tombstone.
     if (!read && (await store.get(releasedEstateKey(e.user_id, e.created_at), { type: "json" }))) {
@@ -213,6 +220,13 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
 }
 
 type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step" | "resume_pending" | "test_hold";
+
+/** A test-mode grant holds an existing, not-yet-running record (only that field is written; review r1 C1). */
+export async function holdForTestMode(e: Estate, now: Date = new Date()): Promise<Estate> {
+  e.test_hold = true;
+  await saveEstate(e, now, { owns: ["test_hold"] });
+  return (await getEstate(e.user_id)) ?? e;
+}
 
 /** A live-mode grant releases a test hold (only that field is written); the next driver then promotes the record. */
 export async function releaseTestHold(e: Estate, now: Date = new Date()): Promise<Estate> {
@@ -544,7 +558,7 @@ export async function advanceEstate(
   const fetchImpl = opts.fetchImpl ?? fetch;
   const cfg = flyConfig();
 
-  if (e.status === "pending_manual" && e.test_hold) {
+  if (e.test_hold) {
     return { estate: e, outcome: "idle", note: "held: queued by a Stripe test-mode grant; a live-mode grant releases it" };
   }
   if (e.status === "pending_manual" && fly && cfg) {
@@ -774,6 +788,7 @@ export function provisionRetryDue(e: Estate, now: Date): boolean {
  * retry, so a stale copy or a second driver cannot retry twice. True when the estate went back to provisioning.
  */
 export async function autoRetryFailedEstate(e: Estate, now: Date = new Date()): Promise<boolean> {
+  if (e.test_hold) return false; // held by a Stripe test-mode grant: never retried into provisioning
   if (!provisionRetryDue(e, now)) return false;
   const due = e.provision_retry!.next_retry_at;
   const count = e.provision_retry!.count + 1;

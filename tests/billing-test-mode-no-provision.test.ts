@@ -13,7 +13,7 @@ import { freshStore } from "./helpers";
 import { createUser, getUserById, saveUser, type User } from "../src/lib/users";
 import { stripeConfig } from "../src/lib/stripe";
 import { handleStripeEvent, retryPendingSuspend } from "../src/lib/billing";
-import { advanceEstate, getEstate, queueEstate, saveEstate } from "../src/lib/estates";
+import { advanceEstate, autoRetryFailedEstate, getEstate, queueEstate, saveEstate } from "../src/lib/estates";
 
 const STRIPE_ENV = { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_OPERATOR: "price_op", STRIPE_PRICE_SOVEREIGN: "price_sov" };
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
@@ -212,5 +212,78 @@ describe("a later live-mode grant releases the hold", () => {
     const r = await advanceEstate(e, fly);
     expect((await getEstate(user.id))!.status).toBe("provisioning");
     expect(r.outcome).not.toBe("idle");
+  });
+});
+
+// Review r1 (2026-11-21) C1-C3.
+describe("r1 C1: a held grant also holds an estate that already exists and is not ready", () => {
+  for (const status of ["provisioning", "pending_manual", "error"] as const) {
+    it(`an existing ${status} estate gets test_hold and is never advanced or auto-retried`, async () => {
+      const e = await queueEstate(user);
+      Object.assign(e, { status, provision_retry: status === "error" ? { count: 0, next_retry_at: new Date(0).toISOString() } : null, attempts: status === "error" ? 99 : 0 });
+      await saveEstate(e);
+      const { calls } = await apply(false);
+      const held = (await getEstate(user.id))!;
+      expect(held.test_hold).toBe(true);
+      expect(calls).toEqual([]);
+      const { fly, calls: advCalls } = recordingFly();
+      const r = await advanceEstate(held, fly);
+      expect(r.outcome).toBe("idle");
+      expect(advCalls).toEqual([]);
+      expect(await autoRetryFailedEstate((await getEstate(user.id))!, new Date())).toBe(false);
+    });
+  }
+
+  it("an existing ready estate is NOT marked held (it is already running; maintenance is unchanged)", async () => {
+    const e = await queueEstate(user);
+    Object.assign(e, { status: "ready", machine_id: "m_1", step: "done" });
+    await saveEstate(e);
+    await apply(false);
+    expect((await getEstate(user.id))!.test_hold ?? false).toBe(false);
+  });
+});
+
+describe("r1 C2: a stale whole-record write never brings a released hold back", () => {
+  it("held copy read, live grant releases the hold, stale copy saved: the hold stays released", async () => {
+    await apply(false);
+    const stale = (await getEstate(user.id))!;
+    expect(stale.test_hold).toBe(true);
+    await apply(true);
+    expect((await getEstate(user.id))!.test_hold ?? false).toBe(false);
+    stale.log = [...stale.log, { at: new Date().toISOString(), step: "x", note: "stale writer" }];
+    await saveEstate(stale);
+    expect((await getEstate(user.id))!.test_hold ?? false).toBe(false);
+  });
+
+  it("the tick does not count or kick a worker for a held estate", async () => {
+    await apply(false);
+    process.env.URL = "https://portal.test";
+    try {
+      const body = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
+      expect(body.pending).toBe(0);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.URL;
+    }
+  });
+});
+
+describe("r1 C3: a pending suspension is still retried for a held user", () => {
+  it("retryPendingSuspend stops the machine of a held user's estate with suspend_pending", async () => {
+    const e = await queueEstate(user);
+    Object.assign(e, { status: "ready", machine_id: "m_1", step: "done" });
+    await saveEstate(e);
+    await apply(false);
+    const cur = (await getEstate(user.id))!;
+    cur.suspend_pending = { reason: "test", since: new Date().toISOString(), attempts: 1, last_error: "machine stop failed", next_retry_at: null, failed: false };
+    await saveEstate(cur);
+    const { fly, calls } = recordingFly();
+    const r = await retryPendingSuspend(user.id, fly);
+    // Before the fix the held user's pending suspension was answered "cleared" with no Fly call at all. Now it goes
+    // through suspendEstate (the generic double cannot model a full stop, so the outcome may stay "pending" for the
+    // next retry); what matters: the suspend path ran, and nothing was started.
+    expect(["suspended", "pending"]).toContain(r.outcome);
+    expect(calls).toContain("getMachine");
+    expect(calls.some((c) => /start/i.test(c))).toBe(false);
   });
 });
