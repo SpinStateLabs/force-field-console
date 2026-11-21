@@ -19,6 +19,7 @@ import {
 } from "../../src/lib/stripe";
 import { checkoutIdempotencyKey, claimCheckout, claimEvent, eventDone, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
 import { flyClientOrNull } from "../../src/lib/fly";
+import { TRIAL_DAYS } from "../../src/lib/tiers";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -128,6 +129,9 @@ export default async (req: Request, _context: Context): Promise<Response> => {
           success_url: origin + "/app.html?checkout=success",
           cancel_url: origin + "/app.html?checkout=cancelled",
           idempotency_key: checkoutIdempotencyKey(user.id, tier, user.billing?.customer_id ?? null),
+          // The free trial is for a FIRST subscription only: an account that already has a Stripe customer
+          // (an earlier subscription, cancelled or not) gets none.
+          trial_days: user.billing?.customer_id ? 0 : TRIAL_DAYS,
         });
         return json(200, { url: session.url });
       } catch (e) {
