@@ -105,7 +105,7 @@ describe("registering an agent", () => {
 
   it("platform self-agents and retired agents do not count", async () => {
     await readyEstate(2);
-    agents = [...own(1), { agent_id: "ff-sentinel", owner: SELF_OWNER, status: "active" }, { agent_id: "old", owner: "me@example.com", status: "retired" }];
+    agents = [...own(1), { agent_id: "conformance-sentinel", owner: SELF_OWNER, status: "active" }, { agent_id: "old", owner: "me@example.com", status: "retired" }];
     expect((await reg("second")).status).toBe(201);
     expect((await reg("third")).status).toBe(403);
   });
@@ -217,5 +217,15 @@ describe("revival fails closed", () => {
     const r = await send("/registry/agents/ghost", "PATCH", { status: "active" });
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);
     expect(r.status).not.toBe(403);
+  });
+});
+
+describe("self-agent owner spoofing", () => {
+  it("an agent registered under the platform owner name but not a platform id COUNTS", async () => {
+    await readyEstate(2);
+    agents = [...own(1), { agent_id: "my-hidden-bot", owner: SELF_OWNER, status: "active" }, { agent_id: "force-gateway", owner: SELF_OWNER, status: "active" }];
+    const r = await reg("third");
+    expect(r.status).toBe(403);
+    expect((await r.json()).error.in_use).toBe(2);
   });
 });

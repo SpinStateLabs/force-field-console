@@ -5,7 +5,14 @@
 // Gated: registering an agent and reviving a retired one. Retiring, reading and every other service pass untouched, so
 // a customer over the pool (seats lowered) can always get back under it.
 import type { User } from "./users";
-import { SELF_OWNER } from "./estates";
+import { SELF_AGENTS, SELF_OWNER } from "./estates";
+
+/** The platform's own agents: exempt from the pool only by BOTH their fixed id and the platform owner string, so a
+ * customer cannot hide agents from the count by registering them under the platform's owner name. */
+const SELF_AGENT_IDS = new Set(SELF_AGENTS.map((a) => a.id));
+function isPlatformSelfAgent(a: any): boolean {
+  return a?.owner === SELF_OWNER && SELF_AGENT_IDS.has(String(a?.agent_id ?? ""));
+}
 import { agentPool, seatBounds } from "./pricebook";
 
 /**
@@ -47,7 +54,7 @@ export function classify(method: string, canon: string, body: ArrayBuffer | unde
 /** Agents that count against the pool. */
 export function agentsInUse(list: unknown): number | null {
   if (!Array.isArray(list)) return null;
-  return list.filter((a: any) => a && a.owner !== SELF_OWNER && String(a.status ?? "").toLowerCase() !== "retired").length;
+  return list.filter((a: any) => a && !isPlatformSelfAgent(a) && String(a.status ?? "").toLowerCase() !== "retired").length;
 }
 
 /** The account's pool, or null when the account has no paid seat tier (no pool to enforce). */
