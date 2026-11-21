@@ -416,7 +416,7 @@ describe("a released record cannot come back from a stale copy", () => {
 
 describe("release against the Stripe webhook (same user lock)", () => {
   const sub = (status: string) => ({ id: "sub_9", status, customer: "cus_1", items: { data: [{ price: { id: "price_op" }, current_period_end: 1_800_000_000 }] }, metadata: { user_id: user.id } });
-  const active = (id: string) => ({ id, type: "customer.subscription.updated", created: 1_800_000_000, data: { object: sub("active") } });
+  const active = (id: string) => ({ id, livemode: true, type: "customer.subscription.updated", created: 1_800_000_000, data: { object: sub("active") } });
   const fetchImpl = (async () => new Response(JSON.stringify(sub("active")), { status: 200 })) as any;
   const deps = (fly: unknown) => ({ cfg: stripeConfig()!, fly: fly as any, fetchImpl });
 

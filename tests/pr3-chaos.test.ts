@@ -36,7 +36,7 @@ let stripeFault = 0;
 function sub(id: string, status: string) {
   return { id, status, customer: "cus_1", items: { data: [{ price: { id: "price_op" }, current_period_end: 1_800_000_000 }] }, metadata: { user_id: user.id } };
 }
-const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, data: { object: s } });
+const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, livemode: true, data: { object: s } });
 const fetchImpl = (async (u: any) => {
   if (stripeFault > 0 && rnd() < stripeFault) {
     if (rnd() < 0.5) throw new Error("timeout");

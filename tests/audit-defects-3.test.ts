@@ -108,7 +108,7 @@ describe("MED: the tick's suspend retry cannot override a reactivation", () => {
     try {
       const tick = tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }));
       await sleep(10);
-      await handleStripeEvent({ id: "e_react", type: "customer.subscription.updated", created: 300, data: { object: sub("active", user.id) } }, { cfg: stripeConfig()!, fly: webhookFly as any });
+      await handleStripeEvent({ id: "e_react", livemode: true, type: "customer.subscription.updated", created: 300, data: { object: sub("active", user.id) } }, { cfg: stripeConfig()!, fly: webhookFly as any });
       await tick;
     } finally {
       globalThis.fetch = realFetch;
@@ -247,9 +247,9 @@ describe("mutation guards: lock, compare-and-set and token checks", () => {
     const fly = new SlowFly();
     fly.startDelay = 80;
     const deps = { cfg: stripeConfig()!, fly: fly as any };
-    const act = handleStripeEvent({ id: "ea", type: "customer.subscription.updated", created: 100, data: { object: sub("active", user.id) } }, deps);
+    const act = handleStripeEvent({ id: "ea", livemode: true, type: "customer.subscription.updated", created: 100, data: { object: sub("active", user.id) } }, deps);
     await sleep(10);
-    const del = handleStripeEvent({ id: "ed", type: "customer.subscription.deleted", created: 200, data: { object: sub("canceled", user.id) } }, deps);
+    const del = handleStripeEvent({ id: "ed", livemode: true, type: "customer.subscription.deleted", created: 200, data: { object: sub("canceled", user.id) } }, deps);
     await Promise.allSettled([act, del]);
     expect((await getEstate(user.id))!.status).toBe("suspended");
   });

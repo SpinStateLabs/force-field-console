@@ -21,7 +21,7 @@ const origDelay = readback.delayMs;
 function sub(id: string, status: string) {
   return { id, status, customer: "cus_1", items: { data: [{ price: { id: "price_op" }, current_period_end: 1_800_000_000 }] }, metadata: { user_id: user.id } };
 }
-const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, data: { object: s } });
+const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, livemode: true, data: { object: s } });
 /** Stripe stand-in for getSubscription: answers each subscription with its current status in `statuses`. */
 const fetchImpl = (async (u: any) => {
   const id = String(u).split("/").pop()!;
