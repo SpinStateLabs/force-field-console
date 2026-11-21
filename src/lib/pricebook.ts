@@ -15,16 +15,17 @@ export const PRICE_BOOK = {
   free: { install_url: "https://github.com/SpinStateLabs/Force-Field#install-the-marketplace" },
   /** Self-serve tiers, keyed by the internal tier id. Prices are per seat per month. */
   tiers: {
-    /** [rec, flagged] 1 to 2 seats; a pool of 5 governed agents per account. */
-    operator: { seat_month: 24, min_seats: 1, max_seats: 2 as number | null, agents_base: 5, agents_per_seat: 0 },
+    /** [Don 2026-11-21, rev 4] 1 to 2 seats; a pool of 5 governed agents PER SEAT. */
+    operator: { seat_month: 24, min_seats: 1, max_seats: 2 as number | null, agents_base: 0, agents_per_seat: 5 },
     /** [Don] minimum 3 seats; [record 2026-11-10] a pool of 20 agents per seat. Display label "Estate". */
     sovereign: { seat_month: 24, min_seats: 3, max_seats: null as number | null, agents_base: 0, agents_per_seat: 20 },
   },
-  /** [rec] contact sales (no self-serve checkout): 2x Estate, minimum 25 seats; pool sized by contract. */
-  enterprise: { seat_month: 48, min_seats: 25 },
+  /** [Don 2026-11-21] contact sales (no self-serve checkout): 32 per seat, minimum 25 seats; pool sized by contract. */
+  enterprise: { seat_month: 32, min_seats: 25 },
   /** [Don structure, rec numbers] top-up pack: +20 agents to the pool for the billing period, a second subscription item;
-   *  max_packs [rec] caps one account's self-serve packs (more goes through sales). */
-  pack: { agents: 20, month: 12, max_packs: 50 },
+   *  max_packs [rec] caps one account's self-serve packs (more goes through sales); max_per_seat [Don 2026-11-21, rev 4]
+   *  caps packs at one per seat, so a pool can at most double for Estate. */
+  pack: { agents: 20, month: 12, max_packs: 50, max_per_seat: 1 },
 } as const;
 
 export type SelfServeTier = keyof typeof PRICE_BOOK.tiers;
@@ -47,8 +48,17 @@ export function seatBounds(tier: SelfServeTier): { min: number; max: number | nu
   return { min: t.min_seats, max: t.max_seats };
 }
 
-/** Governed agents the account may run: the tier's base plus per-seat pool, plus packs. */
+/** Most packs an account with `seats` seats may hold: one per seat (rev 4), and never more than max_packs. */
+export function maxPacksFor(seats: number): number {
+  return Math.min(Math.max(0, seats) * PRICE_BOOK.pack.max_per_seat, PRICE_BOOK.pack.max_packs);
+}
+
+/**
+ * Governed agents the account may run: the tier's base plus per-seat pool, plus packs. Packs beyond maxPacksFor(seats)
+ * (seats lowered in the Stripe portal after packs were bought) do not count; the webhook flags that state.
+ */
 export function agentPool(tier: SelfServeTier, seats: number, packs: number): number {
   const t = PRICE_BOOK.tiers[tier];
-  return t.agents_base + t.agents_per_seat * Math.max(0, seats) + PRICE_BOOK.pack.agents * Math.max(0, packs);
+  const counted = Math.min(Math.max(0, packs), maxPacksFor(seats));
+  return t.agents_base + t.agents_per_seat * Math.max(0, seats) + PRICE_BOOK.pack.agents * counted;
 }

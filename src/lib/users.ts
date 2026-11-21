@@ -42,6 +42,8 @@ export type Billing = {
   agent_pool?: number;
   /** The tier item's quantity is below the tier's minimum (e.g. lowered in the portal): tier kept, flagged and alerted. */
   seats_below_minimum?: true;
+  /** More packs than seats allow (rev 4: one per seat): the excess does not count toward agent_pool; flagged and alerted. */
+  packs_over_seats?: true;
 };
 
 export type User = {

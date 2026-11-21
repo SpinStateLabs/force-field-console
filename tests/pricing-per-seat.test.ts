@@ -36,22 +36,22 @@ describe("price book (one config object)", () => {
     expect(PRICE_BOOK.annual_discount).toBe(0.1);
     expect(PRICE_BOOK.tiers.operator).toMatchObject({ seat_month: 24, min_seats: 1, max_seats: 2 });
     expect(PRICE_BOOK.tiers.sovereign).toMatchObject({ seat_month: 24, min_seats: 3, max_seats: null });
-    expect(PRICE_BOOK.enterprise).toMatchObject({ seat_month: 48, min_seats: 25 });
+    expect(PRICE_BOOK.enterprise).toMatchObject({ seat_month: 32, min_seats: 25 });
     expect(PRICE_BOOK.pack).toMatchObject({ agents: 20, month: 12 });
   });
 
   it("annual is 10% off: 21.60 per seat per month, 259.20 per seat per year", () => {
     expect(annualSeatMonth(24)).toBe(21.6);
     expect(annualSeatYear(24)).toBe(259.2);
-    expect(annualSeatMonth(48)).toBe(43.2);
-    expect(annualSeatYear(48)).toBe(518.4);
+    expect(annualSeatMonth(32)).toBe(28.8);
+    expect(annualSeatYear(32)).toBe(345.6);
     expect(annualSeatYear(12)).toBe(129.6);
   });
 
   it("seat bounds and the agent pool", () => {
     expect(seatBounds("operator")).toEqual({ min: 1, max: 2 });
     expect(seatBounds("sovereign")).toEqual({ min: 3, max: null });
-    expect(agentPool("operator", 2, 0)).toBe(5);
+    expect(agentPool("operator", 2, 0)).toBe(10); // rev 4 change 1: 5 per seat
     expect(agentPool("operator", 1, 1)).toBe(25);
     expect(agentPool("sovereign", 3, 0)).toBe(60);
     expect(agentPool("sovereign", 4, 2)).toBe(120);
@@ -223,7 +223,7 @@ describe("copy matches the price book", () => {
     expect(html).not.toContain("Start on Sandbox");
     expect(html).toMatch(/<h3 class="tier-name">Operator<\/h3>\s*<p class="tier-price">CA\$24<span class="per">\/seat\/mo<\/span><\/p>/);
     expect(html).toMatch(/<h3 class="tier-name">Estate<\/h3>\s*<p class="tier-price">CA\$24<span class="per">\/seat\/mo<\/span><\/p>/);
-    expect(html).toMatch(/<h3 class="tier-name">Enterprise<\/h3>\s*<p class="tier-price">CA\$48<span class="per">\/seat\/mo<\/span><\/p>/);
+    expect(html).toMatch(/<h3 class="tier-name">Enterprise<\/h3>\s*<p class="tier-price">CA\$32<span class="per">\/seat\/mo<\/span><\/p>/);
     expect(html).toContain("minimum 3 seats (CA$72/mo)");
     expect(html).toContain("minimum 25 seats");
     expect(html).toContain("30 days free");
