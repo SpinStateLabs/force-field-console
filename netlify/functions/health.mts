@@ -7,10 +7,20 @@
 import type { Context, Config } from "@netlify/functions";
 import { env, portalStore, storeScope } from "../../src/lib/store";
 import { sharedPriceIds, stripeConfig } from "../../src/lib/stripe";
-import { BILLING_FLAGS_KEY } from "../../src/lib/billing";
+import { BILLING_FLAGS_KEY, TEST_MODE_PROVISIONING_VAR } from "../../src/lib/billing";
 import { flyConfig } from "../../src/lib/fly";
 
-export const PORTAL_VERSION = "0.2.2";
+/** 0.2.3: the first version that carries the Stripe test-mode guard (PR 21) and reports it below. */
+export const PORTAL_VERSION = "0.2.3";
+
+/**
+ * Stripe mode from the secret key's PREFIX only (sk_/rk_ + test_/live_); the key itself never leaves this function.
+ * null when billing is not configured or the prefix is not one Stripe documents (unknown, never guessed).
+ */
+export function stripeMode(secretKey: string | null | undefined): "test" | "live" | null {
+  const m = /^(?:sk|rk)_(test|live)_/.exec(secretKey ?? "");
+  return m ? (m[1] as "test" | "live") : null;
+}
 
 export default async (req: Request, _context: Context): Promise<Response> => {
   if (req.method !== "GET") {
@@ -68,6 +78,10 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       // A Stripe price id is configured for both tiers (it maps to no tier until STRIPE_PRICE_* is fixed); null when billing is not configured.
       price_config_shared: billingCfg ? sharedPriceIds(billingCfg).length > 0 : null,
       provisioning_configured: flyConfig() !== null,
+      // Stripe key mode from its prefix only ("test" | "live" | null). With "test" and test_mode_provisioning false,
+      // a checkout grants the tier but provisions nothing on Fly (src/lib/billing.ts provisioningAllowed).
+      stripe_mode: billingCfg ? stripeMode(billingCfg.secret_key) : null,
+      test_mode_provisioning: env(TEST_MODE_PROVISIONING_VAR) === "true",
       // Which blob store this invocation uses: "site" on production, "deploy" elsewhere.
       // "deploy" on the production URL means records will not survive the next deploy.
       store_scope: storeScope(),
