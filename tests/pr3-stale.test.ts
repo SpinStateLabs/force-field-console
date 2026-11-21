@@ -8,7 +8,7 @@ import { getEstate, queueEstate, readback, saveEstate } from "../src/lib/estates
 const ENV = { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_OPERATOR: "price_op", STRIPE_PRICE_SOVEREIGN: "price_sov", FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:new", ESTATE_SECRET_MASTER: "master-0123456789" };
 let user: User; let fly: ModelFly; const orig = readback.delayMs;
 const sub = (id: string, status: string) => ({ id, status, customer: "cus_1", items: { data: [{ price: { id: "price_op" }, current_period_end: 1_800_000_000 }] }, metadata: { user_id: user.id } });
-const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, data: { object: s } });
+const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, livemode: true, data: { object: s } });
 const st: Record<string, string> = {};
 const fetchImpl = (async (u: any) => { const id = String(u).split("/").pop()!; return new Response(JSON.stringify(sub(id, st[id] ?? "canceled")), { status: 200 }); }) as any;
 beforeEach(async () => { freshStore(); Object.assign(process.env, ENV); readback.delayMs = 2; user = await createUser("st@example.com", "sufficiently-long-pass"); fly = new ModelFly(); });

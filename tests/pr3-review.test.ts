@@ -29,7 +29,7 @@ const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTAT
 function sub(id: string, status: string, userId: string) {
   return { id, status, customer: "cus_1", items: { data: [{ price: { id: "price_op" }, current_period_end: 1_800_000_000 }] }, metadata: { user_id: userId } };
 }
-const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, data: { object: s } });
+const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, livemode: true, data: { object: s } });
 
 let user: User;
 let fly: ModelFly;

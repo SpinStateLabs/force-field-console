@@ -11,7 +11,7 @@ import { flyClientOrNull, flyConfig } from "../../src/lib/fly";
 import { advanceEstate, autoRetryFailedEstate, checkEstateHealth, provisionRetryDue, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
 import { userLockAgeMs } from "../../src/lib/locks";
 import { getUserById } from "../../src/lib/users";
-import { isGrantingUser, retryPendingSuspend } from "../../src/lib/billing";
+import { flyHeld, isGrantingUser, retryPendingSuspend } from "../../src/lib/billing";
 import { portalStore } from "../../src/lib/store";
 import { renewalDue } from "../../src/lib/renewal";
 import { kickWorker } from "../../src/lib/worker";
@@ -44,7 +44,8 @@ export default async (_req: Request): Promise<Response> => {
     await Promise.all(
       checkable.map(async (e) => {
         try {
-          if (!isGrantingUser(await getUserById(e.user_id))) return;
+          const owner = await getUserById(e.user_id);
+          if (!isGrantingUser(owner) || flyHeld(owner)) return; // a test-mode grant never starts a machine
           const m = await fly.getMachine(e.app, e.machine_id!, 8000);
           if (m && m.state === "stopped") {
             machineStopped += 1;

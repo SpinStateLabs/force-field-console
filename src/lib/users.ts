@@ -31,6 +31,11 @@ export type Billing = {
   other_subs?: Record<string, { status: string; price_id: string | null }>;
   /** Audit H1: the subscription is in a granting status on a price id that maps to no configured tier. */
   price_unmatched?: true;
+  /**
+   * The event applied last was not a live-mode Stripe event (livemode false, missing or not a boolean) and the
+   * test-mode opt-in was not set: the tier is granted, but nothing starts, resumes or provisions on Fly for it.
+   */
+  test_mode?: true;
 };
 
 export type User = {

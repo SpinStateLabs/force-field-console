@@ -68,6 +68,7 @@ describe("defect 1: subscription events are ordered", () => {
     id,
     type,
     created,
+    livemode: true,
     data: { object: sub(over, user.id) },
   });
 
@@ -103,7 +104,7 @@ describe("defect 1: subscription events are ordered", () => {
     await handleStripeEvent(ev("b", "customer.subscription.updated", 300, { status: "unpaid" }), deps);
     expect((await getUserById(user.id))!.tier).toBe("sandbox");
     // another subscription id has its own mark
-    const other = await handleStripeEvent({ id: "c", type: "customer.subscription.updated", created: 50, data: { object: sub({ id: "sub_2", status: "active" }, user.id) } }, deps);
+    const other = await handleStripeEvent({ id: "c", livemode: true, type: "customer.subscription.updated", created: 50, data: { object: sub({ id: "sub_2", status: "active" }, user.id) } }, deps);
     expect(other.handled).toBe(true);
     expect((await getUserById(user.id))!.tier).toBe("operator");
   });
@@ -171,11 +172,11 @@ describe("defect 2: a failed stop never marks the estate suspended", () => {
     const fly = new StopFly();
     fly.stopFails = true;
     const deps = { cfg: stripeConfig()!, fly: fly as any };
-    await handleStripeEvent({ id: "d", type: "customer.subscription.deleted", created: 10, data: { object: sub({ status: "canceled" }, user.id) } }, deps);
+    await handleStripeEvent({ id: "d", livemode: true, type: "customer.subscription.deleted", created: 10, data: { object: sub({ status: "canceled" }, user.id) } }, deps);
     let cur = (await getEstate(user.id))!;
     expect(cur.status).toBe("ready");
     expect((cur as any).suspend_pending).toBeTruthy();
-    await handleStripeEvent({ id: "r", type: "customer.subscription.updated", created: 20, data: { object: sub({ status: "active" }, user.id) } }, deps);
+    await handleStripeEvent({ id: "r", livemode: true, type: "customer.subscription.updated", created: 20, data: { object: sub({ status: "active" }, user.id) } }, deps);
     await retryPendingSuspend(user.id, fly as any, new Date()); // the tick checks the machine and clears the flag
     cur = (await getEstate(user.id))!;
     expect(cur.status).toBe("ready");
