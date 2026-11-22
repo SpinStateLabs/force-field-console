@@ -5,7 +5,7 @@ import billingHandler from "../netlify/functions/billing.mts";
 import estateHandler from "../netlify/functions/estate.mts";
 import tickHandler from "../netlify/functions/estate-tick.mts";
 import { ModelFly, machinesApiHandler } from './model-fly';
-import { freshStore } from "./helpers";
+import { freshStore, payingFixture } from "./helpers";
 import { createUser, getUserById, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { stripeConfig } from "../src/lib/stripe";
@@ -194,6 +194,8 @@ describe("defect 3: a worker's blind save cannot undo a suspend", () => {
     freshStore();
     Object.assign(process.env, FLY_ENV);
     user = await createUser("race@example.com", "sufficiently-long-pass");
+    // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+    await payingFixture(user);
   });
   afterEach(() => {
     for (const k of Object.keys(FLY_ENV)) delete process.env[k];
@@ -318,6 +320,8 @@ describe("defect 6: /api/estate/advance answers 501 when unconfigured", () => {
   beforeEach(async () => {
     freshStore();
     user = await createUser("adv@example.com", "sufficiently-long-pass");
+    // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+    await payingFixture(user);
     delete process.env.FLY_API_TOKEN;
   });
   afterEach(() => {

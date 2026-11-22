@@ -5,7 +5,7 @@
 // from the subscription's LIVE state at Stripe, not from whichever payload arrived last.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ModelFly } from "./model-fly";
-import { freshStore, MemStore } from "./helpers";
+import { freshStore, MemStore, seedPaid } from "./helpers";
 import { setStoreForTesting } from "../src/lib/store";
 import { createUser, getUserById, type User } from "../src/lib/users";
 import { stripeConfig } from "../src/lib/stripe";
@@ -48,6 +48,8 @@ describe("CX6 g2-equal-second: same-second non-cancel events resolve to Stripe's
     Object.assign(process.env, STRIPE_ENV);
     stripeGets = [];
     user = await createUser("tie@example.com", "sufficiently-long-pass");
+    // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+    await seedPaid("sub_1");
     user.tier = "operator";
     const e = await queueEstate(user);
     e.status = "ready";
@@ -149,6 +151,8 @@ describe("CX6 review round 1: retries, mark contents, live-object checks", () =>
     Object.assign(process.env, STRIPE_ENV);
     stripeGets = [];
     user = await createUser("retry@example.com", "sufficiently-long-pass");
+    // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+    await seedPaid("sub_1");
     user.tier = "operator";
     const e = await queueEstate(user);
     e.status = "ready";

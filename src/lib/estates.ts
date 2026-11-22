@@ -20,6 +20,7 @@ import { env, portalStore } from "./store";
 import type { User } from "./users";
 import { trialInfo } from "./trial";
 import { withUserLock } from "./locks";
+import { PARKED_NOTE, mayRunEstateFor } from "./paid";
 import { FlyError, estateMachineConfig, estateOrigin, flyConfig, withAutostart, type FetchLike, type FlyClient, type MachineConfig } from "./fly";
 
 export type EstateStatus = "pending_manual" | "provisioning" | "ready" | "suspended" | "error";
@@ -561,6 +562,12 @@ export async function advanceEstate(
 
   if (e.test_hold) {
     return { estate: e, outcome: "idle", note: "held: queued by a Stripe test-mode grant; a live-mode grant releases it" };
+  }
+  // Review #29 r5 B1: THE choke point of every provisioning driver (POST /api/estate/advance and /retry, the background
+  // worker, the tick's pending list). A record whose owner may not run an estate (mayRunEstate: active AND this
+  // subscription paid) is parked: no Fly call, no state change, one fixed note.
+  if ((e.status === "provisioning" || e.status === "pending_manual") && !(await mayRunEstateFor(e.user_id))) {
+    return { estate: e, outcome: "idle", note: PARKED_NOTE };
   }
   if (e.status === "pending_manual" && fly && cfg) {
     e.status = "provisioning";

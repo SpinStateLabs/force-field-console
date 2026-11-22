@@ -27,6 +27,8 @@ import {
 } from "./stripe";
 import { getEstate, holdForTestMode, markResumePending, queueEstate, recordResumeFailure, recordReverifyFailure, releaseTestHold, resumeEstate, reverifyBackoffUntil, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
+import { PAID_SUBSCRIPTIONS_PREFIX, isPaidSubscription, mayRunEstate } from "./paid";
+export { PAID_SUBSCRIPTIONS_PREFIX, isPaidSubscription, mayRunEstate };
 import { PRICE_BOOK, agentPool, maxPacksFor, seatBounds } from "./pricebook";
 
 export type WebhookDeps = {
@@ -363,6 +365,17 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     // refuses with estate_not_ready (awaiting_first_payment). Cleared by the first invoice.paid with an amount.
     ...(granting && sub.status === "active" && !(await isPaidSubscription(sub.id)) ? { first_payment_pending: true as const } : {}),
   };
+  // Review #29 r5 M2: a granting subscription WITHOUT its own paid invoice may not keep an estate running (F2: a hand-over
+  // to a remembered unpaid subscription; a legacy record the backfill missed). The suspension is persisted BEFORE the user
+  // record names the new subscription: if this function dies in between, the redelivered event finds the user still on
+  // the old subscription, runs the same hand-over and reaches this point again; once the user is saved, nothing remains
+  // to do. No in-memory "prior subscription" decides it.
+  if (granting && !(await isPaidSubscription(sub.id))) {
+    const running = await getEstate(user.id);
+    if (running && !running.suspend_pending && (running.status === "ready" || running.status === "provisioning" || running.status === "error")) {
+      await suspendEstate(running, deps.fly, now, `subscription ${sub.status} without a paid invoice`);
+    }
+  }
   await saveUser(user);
   await store.setJSON("stripe_customers/" + sub.customer, { user_id: user.id });
 
@@ -383,7 +396,7 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   // trialing, past_due, incomplete and unpaid create none; a payment on an OLD subscription unlocks nothing for a new
   // one, and a SUSPENDED estate is resumed only on the new subscription's own paid invoice. Order does not matter: if
   // invoice.paid comes first this event queues the estate; if it comes second, the invoice.paid handler does.
-  if (granting) await ensureEstateOnGrant(user, sub, deps, now, prior?.subscription_id ?? null);
+  if (granting) await ensureEstateOnGrant(user, sub, deps, now);
   else {
     const estate = await getEstate(user.id);
     // "suspended" is included: suspendEstate verifies the machine really is stopped instead of trusting the record
@@ -398,12 +411,7 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
  * Paid-subscription record (F2, keyed per SUBSCRIPTION by ruling Q3): a paid invoice with amount_paid > 0 and a line on
  * a configured price was seen for this Stripe subscription. Create-only; it keeps the FIRST paid invoice.
  */
-export const PAID_SUBSCRIPTIONS_PREFIX = "paid_subscriptions/";
-export async function isPaidSubscription(subscriptionId: string): Promise<boolean> {
-  const store = await portalStore();
-  return Boolean(await store.get(PAID_SUBSCRIPTIONS_PREFIX + subscriptionId, { type: "json" }));
-}
-async function markPaidSubscription(subscriptionId: string, customer: string, invoiceId: string, now: Date): Promise<void> {
+export async function markPaidSubscription(subscriptionId: string, customer: string, invoiceId: string, now: Date): Promise<void> {
   const store = await portalStore();
   await store.setJSONIfNew(PAID_SUBSCRIPTIONS_PREFIX + subscriptionId, { customer, first_paid_invoice: invoiceId, at: now.toISOString() });
 }
@@ -413,53 +421,55 @@ function invoiceLinePriceId(l: any): string | null {
   const id = l?.price?.id ?? l?.pricing?.price_details?.price ?? l?.plan?.id ?? null;
   return typeof id === "string" && id.length > 0 ? id : null;
 }
-/** The invoice's lines on a configured TIER price: [any such line, any such line with an amount > 0] (F5a). */
-function invoiceTierLines(inv: any, cfg: WebhookDeps["cfg"]): { onTier: boolean; paidOnTier: boolean } {
+/**
+ * A line's NET amount (review #29 r5 M1): Stripe's line `amount` is gross; coupons and discounts are reported per line in
+ * `discount_amounts` (Stripe docs: discounted price = amount - discount_amounts). A missing amount counts as 0.
+ */
+function lineNet(l: any): number {
+  const gross = Number(l?.amount);
+  if (!Number.isFinite(gross)) return 0;
+  const discounts: any[] = Array.isArray(l?.discount_amounts) ? l.discount_amounts : [];
+  return gross - discounts.reduce((sum, d) => sum + (Number.isFinite(Number(d?.amount)) ? Number(d.amount) : 0), 0);
+}
+/**
+ * The invoice's lines on a configured TIER price (F5a, M1): `onTier` any such line; `paidOnTier` the tier lines' NET total
+ * is > 0 (a 100% tier coupon next to a paid pack, or a positive tier line beside a larger negative tier proration, is
+ * not); `truncated` Stripe sent only the first page of lines (`lines.has_more`), so a tier line may be on a later page.
+ */
+function invoiceTierLines(inv: any, cfg: WebhookDeps["cfg"]): { onTier: boolean; paidOnTier: boolean; truncated: boolean } {
   const lines: any[] = Array.isArray(inv?.lines?.data) ? inv.lines.data : [];
   const tier = lines.filter((l) => {
     const id = invoiceLinePriceId(l);
     return id !== null && tierForPrice(cfg, id) !== null;
   });
-  return { onTier: tier.length > 0, paidOnTier: tier.some((l) => Number(l?.amount) > 0) };
+  const net = tier.reduce((sum, l) => sum + lineNet(l), 0);
+  return { onTier: tier.length > 0, paidOnTier: net > 0, truncated: inv?.lines?.has_more === true };
 }
 
 /**
- * THE rule for every driver that creates, resumes, revives or (from a test hold) releases an estate, and for the tick's
- * keep-it-running checks (review #29 r4 F1): the user's CURRENT subscription is ACTIVE, grants a paid tier, and has its
- * own paid invoice (paid_subscriptions/<sub>). trialing, past_due, an active subscription that never paid (a 100%
- * coupon, a zero first invoice) and a payment on an OLD subscription do not qualify.
+ * The one test of "this invoice is a payment of the tier" (F2/Q1/F5), shared by the invoice.paid handler's branches and
+ * the deploy-time backfill: something was paid, a TIER line carries an amount > 0, and the invoice is in the price
+ * book's currency. The subscription/customer match is the caller's.
  */
-export async function mayRunEstate(u: User | null): Promise<boolean> {
-  if (!u || u.tier === "sandbox" || !u.billing?.subscription_id || u.billing.status !== "active") return false;
-  return isPaidSubscription(u.billing.subscription_id);
+export function isTierPaymentInvoice(inv: any, cfg: WebhookDeps["cfg"]): boolean {
+  const amount = Number(inv?.amount_paid);
+  if (!(Number.isFinite(amount) && amount > 0)) return false;
+  if (!invoiceTierLines(inv, cfg).paidOnTier) return false;
+  return String(inv?.currency ?? "").toLowerCase() === PRICE_BOOK.currency.toLowerCase();
 }
 
+
 /**
- * The estate side of a granting subscription (the webhook's half of mayRunEstate). A NEW estate, a resume (X2) and the
- * release of a test hold (F3) only when THIS subscription is active and has its own paid invoice.
- *  - This subscription never paid: nothing is queued, resumed or released. If it was just ADOPTED from another
- *    subscription (a hand-over, F2) and the estate is running on the old one's payment, that estate is suspended.
- *  - Paid but not active (past_due): the existing estate is kept (a paying customer in dunning is not stopped), but
- *    nothing new is created and a suspended estate stays suspended.
+ * The estate side of a granting subscription (the webhook's half of mayRunEstate). Only an ACTIVE subscription with its
+ * own paid invoice creates an estate, resumes a suspended one (X2) or releases a test hold (F3, L1). Anything else
+ * changes nothing here:
+ *  - never paid: a running estate was already suspended by applySubscription before the user record was saved (M2);
+ *    any other record (none, suspended, pending, held) is left as it is and stays parked (B1);
+ *  - paid but not active (past_due, or trialing on a paid subscription): an estate that is running keeps running through
+ *    the dunning window (ruling r4-1); nothing is created, resumed, released or re-queued.
  */
-async function ensureEstateOnGrant(user: User, sub: StripeSubscription, deps: WebhookDeps, now: Date, priorSubscriptionId: string | null = null): Promise<void> {
-  const paid = await isPaidSubscription(sub.id);
-  if (!paid) {
-    const existing = await getEstate(user.id);
-    const adopted = priorSubscriptionId !== null && priorSubscriptionId !== sub.id;
-    // A record that is not running (none, suspended, a pending stop, pending_manual, a test hold) is left as it is: the
-    // gateway refuses with estate_not_ready / estate_suspended, never the shared sandbox. Same-subscription events
-    // never stop an estate here (that subscription created it, so it paid; records older than the paid marker are a
-    // deploy-time backfill, see the PR).
-    if (existing && adopted && !existing.suspend_pending && (existing.status === "ready" || existing.status === "provisioning" || existing.status === "error")) {
-      await suspendEstate(existing, deps.fly, now, `subscription ${sub.status} without a paid invoice`);
-    }
-    return;
-  }
-  if (sub.status !== "active") {
-    const existing = await getEstate(user.id);
-    if (!existing || existing.status === "suspended" || existing.suspend_pending) return;
-  }
+async function ensureEstateOnGrant(user: User, sub: StripeSubscription, deps: WebhookDeps, now: Date): Promise<void> {
+  if (sub.status !== "active" || !(await isPaidSubscription(sub.id))) return;
   if (deps.provision !== true) {
     // Stripe test mode (or an event without a boolean livemode) and no opt-in: record the estate as held and make
     // no Fly call. A NEW record is created held. An EXISTING record that is not yet running (pending_manual,
@@ -496,7 +506,13 @@ async function handleInvoicePaid(event: any, deps: WebhookDeps): Promise<Webhook
   const subId = typeof subRef === "string" ? subRef : subRef?.id ?? null;
   const customer = typeof inv.customer === "string" ? inv.customer : inv.customer?.id ?? null;
   if (!(Number.isFinite(amount) && amount > 0)) return { handled: false, note: "invoice with nothing paid: no estate" };
-  const { onTier, paidOnTier } = invoiceTierLines(inv, deps.cfg);
+  const { onTier, paidOnTier, truncated } = invoiceTierLines(inv, deps.cfg);
+  // r5: Stripe sent only the first page of lines and they do not show a paid tier: the tier line may be on a later page.
+  // Never silently dropped: recorded as unmatched (ALERT) for an operator to check.
+  if (truncated && !paidOnTier) {
+    await recordUnmatchedEvent(String(event?.id ?? ""), "invoice.paid", subId, now);
+    return { handled: false, note: "paid invoice whose lines are truncated without a paid tier line on the first page: recorded as unmatched" };
+  }
   if (!onTier) return { handled: false, note: "invoice without a line on a configured tier price: not a first payment" };
   // F5c: money was taken on a tier price but the invoice names no subscription or customer: never silently dropped.
   if (!subId || !customer) {

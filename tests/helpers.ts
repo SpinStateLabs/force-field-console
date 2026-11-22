@@ -64,3 +64,21 @@ export function freshStore(): MemStore {
   process.env.SESSION_SECRET = "test-secret-0123456789";
   return store;
 }
+
+/**
+ * Review #29 r5 B1: provisioning (advanceEstate, the worker, the tick, the estate routes) runs only for an ACTIVE
+ * subscription with its own paid invoice. Fixtures that exercise provisioning mechanics make their user such a customer.
+ */
+export const PAID_SEED = { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" };
+export async function seedPaid(...subIds: string[]): Promise<void> {
+  const { portalStore } = await import("../src/lib/store");
+  const s = await portalStore();
+  for (const id of subIds) await s.setJSON("paid_subscriptions/" + id, PAID_SEED);
+}
+export async function payingFixture(user: any, subId = "sub_1"): Promise<void> {
+  const { saveUser } = await import("../src/lib/users");
+  user.tier = "operator";
+  user.billing = { customer_id: "cus_1", subscription_id: subId, status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" };
+  await saveUser(user);
+  await seedPaid(subId);
+}

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import workerHandler from "../netlify/functions/estate-worker-background.mts";
 import tickHandler from "../netlify/functions/estate-tick.mts";
-import { freshStore } from "./helpers";
+import { freshStore, payingFixture } from "./helpers";
 import { createUser, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { SELF_AGENTS, getEstate, queueEstate, saveEstate } from "../src/lib/estates";
@@ -56,6 +56,8 @@ describe("worker loop", () => {
     freshStore();
     Object.assign(process.env, FLY_ENV);
     user = await createUser("worker@example.com", "sufficiently-long-pass");
+    // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+    await payingFixture(user);
   });
 
   afterEach(() => {
@@ -145,6 +147,8 @@ describe("worker and tick functions", () => {
     freshStore();
     Object.assign(process.env, FLY_ENV);
     user = await createUser("fn@example.com", "sufficiently-long-pass");
+    // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+    await payingFixture(user);
   });
 
   afterEach(() => {

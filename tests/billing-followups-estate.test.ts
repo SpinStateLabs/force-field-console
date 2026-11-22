@@ -2,7 +2,7 @@
 //  - retryEstate is conditional on the STORED status still being "error" (a race gives no extra retry)
 //  - provision_retry is reset once an estate reaches ready
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { freshStore } from "./helpers";
+import { freshStore, seedPaid } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
 import { FlyError } from "../src/lib/fly";
 import { MAX_ATTEMPTS, advanceEstate, autoRetryFailedEstate, getEstate, queueEstate, retryEstate, saveEstate } from "../src/lib/estates";
@@ -19,6 +19,8 @@ beforeEach(async () => {
   user.tier = "operator";
   user.billing = { customer_id: "cus_1", subscription_id: "sub_1", status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" };
   await saveUser(user);
+  // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+  await seedPaid("sub_1");
   await queueEstate(user);
 });
 afterEach(() => {

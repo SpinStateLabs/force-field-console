@@ -497,6 +497,36 @@ describe("review #29 r4 F5: the payment must be on the tier line, in the price b
     expect(await getEstate(user.id)).toBeNull();
   });
 
+  it("M1 (r5): a 100% tier COUPON (gross line amount, discount_amounts) next to a paid pack is not a payment of the tier", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(1200, { lines: [{ price: { id: "price_sov" }, amount: 7200, discount_amounts: [{ amount: 7200, discount: "di_1" }] }, { price: { id: "price_pack_x" }, amount: 1200 }] }));
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(false);
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("M1 (r5): a positive tier line beside a LARGER negative tier proration line is not a payment of the tier", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(500, { lines: [{ price: { id: "price_sov" }, amount: 7200 }, { price: { id: "price_sov" }, amount: -9000, proration: true }, { price: { id: "price_pack_x" }, amount: 2300 }] }));
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(false);
+  });
+
+  it("M1 (r5) control: a partly discounted tier line (net > 0) counts", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(3600, { lines: [{ price: { id: "price_sov" }, amount: 7200, discount_amounts: [{ amount: 3600 }] }] }));
+    expect(await getEstate(user.id)).not.toBeNull();
+  });
+
+  it("r5: a paid invoice whose lines are TRUNCATED (has_more) without a paid tier line on page one is recorded as unmatched", async () => {
+    await apply(subEvent("active"));
+    const ev: any = invoicePaid(7200, { lines: [{ price: { id: "price_pack_x" }, amount: 7200 }] });
+    ev.data.object.lines.has_more = true;
+    expect((await apply(ev)).handled).toBe(false);
+    expect(await unmatched(ev.id)).toBeTruthy();
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
   it("F5a control: the same invoice with an amount on the tier line counts", async () => {
     await apply(subEvent("active"));
     await apply(invoicePaid(8400, { lines: [{ price: { id: "price_sov" }, amount: 7200 }, { price: { id: "price_pack_x" }, amount: 1200 }] }));
