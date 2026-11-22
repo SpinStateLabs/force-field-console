@@ -88,8 +88,9 @@ async function expectUntouched(before: Estate) {
 
 beforeEach(async () => {
   store = freshStore();
-  // F2 (#29): an estate starts only after a paid invoice; these tests are about what happens once cus_1 has paid.
-  await store.setJSON("paid_customers/cus_1", { first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
+  // F2 (#29): an estate starts only after the subscription's paid invoice; these tests are about what happens once sub_1
+  // has paid (one UNPAID case below proves the paid check still bites in this file).
+  await store.setJSON("paid_subscriptions/sub_1", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV, SANDBOX_ENV);
   user = await createUser("release@example.com", "sufficiently-long-pass");
   await setBilling("canceled");
@@ -421,6 +422,30 @@ describe("release against the Stripe webhook (same user lock)", () => {
   const active = (id: string) => ({ id, livemode: true, type: "customer.subscription.updated", created: 1_800_000_000, data: { object: sub("active") } });
   const fetchImpl = (async () => new Response(JSON.stringify(sub("active")), { status: 200 })) as any;
   const deps = (fly: unknown) => ({ cfg: stripeConfig()!, fly: fly as any, fetchImpl });
+  // X2 (#29 r3): a suspended estate resumes, and a fresh one is queued, only for a subscription with its own paid invoice.
+  beforeEach(async () => {
+    await store.setJSON("paid_subscriptions/sub_9", { customer: "cus_1", first_paid_invoice: "in_seed9", at: "2026-11-01T00:00:00Z" });
+  });
+
+  it("UNPAID: sub_9 active with no paid invoice neither resumes the suspended estate nor queues a fresh one", async () => {
+    await store.delete("paid_subscriptions/sub_9");
+    const e = await suspendedEstate();
+    const fly = fakeFly();
+    await handleStripeEvent(active("evt_u1"), deps(fly));
+    const kept = (await getEstate(user.id))!;
+    expect(kept.status).toBe("suspended");
+    expect(kept.resume_pending ?? false).toBeFalsy();
+    expect(kept.created_at).toBe(e.created_at);
+  });
+
+  it("UNPAID: after a release, sub_9 active with no paid invoice queues no fresh estate", async () => {
+    await store.delete("paid_subscriptions/sub_9");
+    await suspendedEstate();
+    const fly = fakeFly();
+    await releaseSuspendedEstate(user.id, fly as any, NOW);
+    await handleStripeEvent(active("evt_u2"), deps(fly));
+    expect(await getEstate(user.id)).toBeNull();
+  });
 
   it("a granting event applied first makes the release refuse; the estate stays for its resume", async () => {
     const e = await suspendedEstate();

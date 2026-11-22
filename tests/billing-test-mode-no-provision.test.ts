@@ -67,8 +67,9 @@ async function apply(livemode: unknown, over: Record<string, unknown> = {}) {
 }
 
 beforeEach(async () => {
-  // F2 (#29): an estate starts only after a paid invoice; these tests are about what happens once cus_1 has paid.
-  await freshStore().setJSON("paid_customers/cus_1", { first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
+  // F2 (#29): an estate starts only after the subscription's paid invoice; these tests are about what happens once sub_1
+  // has paid (one UNPAID case below proves the paid check still bites in this file).
+  await freshStore().setJSON("paid_subscriptions/sub_1", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   delete process.env[OPT_IN];
   errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -121,6 +122,13 @@ describe("live mode is unchanged", () => {
     expect(e.test_hold ?? false).toBe(false);
     expect((await getUserById(user.id))!.billing?.test_mode ?? false).toBe(false);
     expect(calls).toEqual([]); // the webhook itself never provisions inline
+  });
+
+  it("UNPAID: livemode true for a subscription with no paid invoice queues no estate", async () => {
+    const { calls } = await apply(true, { id: "sub_2" });
+    expect((await getUserById(user.id))!.tier).toBe("operator");
+    expect(await getEstate(user.id)).toBeNull();
+    expect(calls).toEqual([]);
   });
 });
 

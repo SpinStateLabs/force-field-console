@@ -69,9 +69,9 @@ describe("CX5 unknown-user-before-pointer", () => {
   });
 
   it("the same delivery order with a PAID (active) no-metadata subscription grants and queues the estate", async () => {
-    // F2 (#29): the customer's first invoice was paid (an amount > 0), so an active subscription may queue the estate.
+    // F2 (#29): sub_3's first invoice was paid (an amount > 0), so the active subscription may queue the estate.
     const { portalStore } = await import("../src/lib/store");
-    await (await portalStore()).setJSON("paid_customers/cus_1", { first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
+    await (await portalStore()).setJSON("paid_subscriptions/sub_3", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
     const sub1 = mkSub("sub_1", "incomplete", user.id);
     const sub3 = mkSub("sub_3", "active", null);
     const deps = { cfg: stripeConfig()!, fly: null, fetchImpl: stripeWith([sub1, sub3]) as any };
@@ -83,6 +83,18 @@ describe("CX5 unknown-user-before-pointer", () => {
     expect(u.tier).toBe("operator");
     expect(u.billing).toMatchObject({ customer_id: "cus_1", subscription_id: "sub_3", status: "active" });
     expect(await getEstate(user.id)).not.toBeNull();
+  });
+
+  it("UNPAID: the same delivery order with an active sub_3 that has no paid invoice grants the tier but queues no estate", async () => {
+    const sub1 = mkSub("sub_1", "incomplete", user.id);
+    const sub3 = mkSub("sub_3", "active", null);
+    const deps = { cfg: stripeConfig()!, fly: null, fetchImpl: stripeWith([sub1, sub3]) as any };
+    await handleStripeEvent({ ...ev("evt_3", "customer.subscription.created", 1_700_000_002, sub3), livemode: true }, deps);
+    await handleStripeEvent({ ...ev("evt_1", "customer.subscription.created", 1_700_000_000, sub1), livemode: true }, deps);
+    const u = (await getUserById(user.id))!;
+    expect(u.tier).toBe("operator");
+    expect(u.billing).toMatchObject({ subscription_id: "sub_3", status: "active" });
+    expect(await getEstate(user.id)).toBeNull();
   });
 
   it("a customer whose subscriptions name no portal user is still acknowledged without a change", async () => {

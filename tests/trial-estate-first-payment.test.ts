@@ -61,14 +61,20 @@ function subEvent(status: string, opts: { livemode?: boolean; periodEnd?: number
   };
 }
 /** F2: Stripe's invoice.paid for sub_t (amount in cents). */
-function invoicePaid(amount: number, opts: { livemode?: boolean; customer?: string } = {}) {
+function invoicePaid(amount: number, opts: { livemode?: boolean; customer?: any; price?: string | null; subscription?: string } = {}) {
   seq += 1;
+  const price = opts.price === undefined ? "price_sov" : opts.price;
   return {
     id: "evt_i" + seq,
     livemode: opts.livemode ?? true,
     type: "invoice.paid",
     created: 1_790_000_000 + seq,
-    data: { object: { id: "in_" + seq, object: "invoice", customer: opts.customer ?? "cus_t", subscription: "sub_t", amount_paid: amount } },
+    data: {
+      object: {
+        id: "in_" + seq, object: "invoice", customer: opts.customer ?? "cus_t", subscription: opts.subscription ?? "sub_t", amount_paid: amount,
+        lines: { data: price ? [{ price: { id: price } }] : [] },
+      },
+    },
   };
 }
 const stripeLive = async (url: string) => {
@@ -349,18 +355,30 @@ describe("review #29 F2: the estate starts at the first PAID invoice", () => {
     await apply(subEvent("active"));
     const r = await apply(invoicePaid(0));
     expect(r.handled).toBe(false);
-    const { isPaidCustomer } = await import("../src/lib/billing");
-    expect(await isPaidCustomer("cus_t")).toBe(false);
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(false);
     expect(await getEstate(user.id)).toBeNull();
   });
 
-  it("invoice.paid for an unknown customer: acknowledged, no paid record, no estate", async () => {
+  it("A1: a paid invoice whose portal user cannot be resolved yet is NOT dropped: paid record + unmatched ALERT, no estate", async () => {
     liveSub = { id: "sub_t", status: "active", customer: "cus_stranger", metadata: {}, items: { data: [{ price: { id: "price_sov" }, quantity: 3 }] } };
-    const r = await apply(invoicePaid(7200, { customer: "cus_stranger" }));
+    const ev = invoicePaid(7200, { customer: "cus_stranger" });
+    const r = await apply(ev);
     expect(r.handled).toBe(false);
-    const { isPaidCustomer } = await import("../src/lib/billing");
-    expect(await isPaidCustomer("cus_stranger")).toBe(false);
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(true); // the payment is kept (per subscription)
+    const { portalStore } = await import("../src/lib/store");
+    expect(await (await portalStore()).get("ops/unmatched_events/" + ev.id, { type: "json" })).toBeTruthy();
     expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("A1: invoice.paid first for a subscription without metadata, then the user resolves: the estate is queued", async () => {
+    // sub_t is paid before the portal knows the customer; a later subscription event (with the user) finds the record
+    liveSub = { id: "sub_t", status: "active", customer: "cus_t", metadata: {}, items: { data: [{ price: { id: "price_sov" }, quantity: 3 }] } };
+    await apply(invoicePaid(7200));
+    expect(await getEstate(user.id)).toBeNull();
+    await apply(subEvent("active"));
+    expect((await getEstate(user.id))!.status).toBe("provisioning");
   });
 
   it("the webhook endpoint answers 200 to both (Stripe must not retry them)", async () => {
@@ -374,6 +392,91 @@ describe("review #29 F2: the estate starts at the first PAID invoice", () => {
       const res = await billing(new Request("http://portal.test/api/billing/webhook", { method: "POST", headers: { "stripe-signature": sig }, body: raw }), ctx);
       expect(res.status).toBe(200);
     }
+    expect(await getEstate(user.id)).toBeNull();
+  });
+});
+
+// Review #29 r3 (roley.reviewer, controller rulings Q1, Q3, Q4, X2) and the cheap recommended mutant killers.
+describe("review #29 r3: paid means THIS subscription's invoice, on a configured price", () => {
+  const notFound = async () => new Response(JSON.stringify({ error: { message: "No such subscription" } }), { status: 404, headers: { "content-type": "application/json" } });
+
+  it("Q1: an invoice with an amount but no line on a configured price (another price or currency) creates nothing; 200", async () => {
+    await apply(subEvent("active"));
+    for (const price of ["price_other_usd", null]) {
+      const r = await apply(invoicePaid(1, { price }));
+      expect(r.handled).toBe(false);
+    }
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(false);
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("Q3 / M14: a payment on an OLD subscription does not unlock a NEW one that goes active on a zero invoice", async () => {
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).setJSON("paid_subscriptions/sub_old", { customer: "cus_t", first_paid_invoice: "in_old", at: "2026-10-01T00:00:00Z" });
+    await apply(subEvent("active")); // sub_t, a new subscription
+    await apply(invoicePaid(0));
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("Q4: a paid invoice for a subscription Stripe answers 404 for: unmatched + ALERT, 200, no record", async () => {
+    const ev = invoicePaid(7200, { subscription: "sub_gone" });
+    const r = await handleStripeEvent(ev, { cfg: stripeConfig()!, fly: null, fetchImpl: notFound as any });
+    expect(r.handled).toBe(false);
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_gone")).toBe(false);
+    const { portalStore } = await import("../src/lib/store");
+    expect(await (await portalStore()).get("ops/unmatched_events/" + ev.id, { type: "json" })).toBeTruthy();
+  });
+
+  it("X2: an ex-customer's SUSPENDED estate is not resumed on trialing -> past_due; it is on the new subscription's paid invoice", async () => {
+    const { queueEstate, saveEstate } = await import("../src/lib/estates");
+    const e = await queueEstate((await getUserById(user.id))!);
+    Object.assign(e, { status: "suspended", machine_id: null, step: "done", suspended_from: "ready", suspended_at: new Date().toISOString() });
+    await saveEstate(e);
+    await apply(subEvent("trialing"));
+    await apply(subEvent("past_due"));
+    expect((await getEstate(user.id))!.status).toBe("suspended");
+    await apply(subEvent("active"));
+    expect((await getEstate(user.id))!.status).toBe("suspended"); // active alone is not a payment
+    await apply(invoicePaid(7200));
+    expect((await getEstate(user.id))!.status).not.toBe("suspended");
+  });
+
+  it("M2: paid but NOT active (past_due) creates no new estate", async () => {
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).setJSON("paid_subscriptions/sub_t", { customer: "cus_t", first_paid_invoice: "in_x", at: "2026-11-01T00:00:00Z" });
+    await apply(subEvent("past_due"));
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("M6: an invoice naming another customer than its subscription creates nothing", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(7200, { customer: "cus_other" }));
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(false);
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("M8: the paid record is create-only (it keeps the FIRST paid invoice)", async () => {
+    await apply(subEvent("active"));
+    const first = invoicePaid(7200);
+    await apply(first);
+    await apply(invoicePaid(7200));
+    const { portalStore } = await import("../src/lib/store");
+    const rec: any = await (await portalStore()).get("paid_subscriptions/sub_t", { type: "json" });
+    expect(rec.first_paid_invoice).toBe(first.data.object.id);
+  });
+
+  it("M16: an expanded customer object ({id}) is unwrapped", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(7200, { customer: { id: "cus_t", object: "customer" } }));
+    expect((await getEstate(user.id))!.status).toBe("provisioning");
+  });
+
+  it("M17: the customer match is exact (no case or space folding)", async () => {
+    await apply(subEvent("active"));
+    for (const customer of ["CUS_T", " cus_t", "cus_t "]) await apply(invoicePaid(7200, { customer }));
     expect(await getEstate(user.id)).toBeNull();
   });
 });

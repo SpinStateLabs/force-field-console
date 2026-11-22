@@ -191,7 +191,7 @@ export class World {
         user.billing = { customer_id: cust(u), subscription_id: subId(u, 1), status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: new Date(T0).toISOString() };
         this.net.subs.set(subId(u, 1), { id: subId(u, 1), customer: cust(u), status: "active", price: "price_op", user_meta: id, created: Math.floor(T0 / 1000) - 86400, was_active: true });
         await this.store.inner.setJSON("stripe_customers/" + cust(u), { user_id: id });
-        await this.store.inner.setJSON("paid_customers/" + cust(u), { first_paid_invoice: "in_seed_" + id, at: new Date(T0).toISOString() }); // F2: it has paid
+        await this.store.inner.setJSON("paid_subscriptions/" + subId(u, 1), { customer: cust(u), first_paid_invoice: "in_seed_" + id, at: new Date(T0).toISOString() }); // F2: sub 1 has paid
       }
       await this.store.inner.setJSON(emailKey(email), user);
       await this.store.inner.setJSON("uid/" + id, { email_key: emailKey(email) });
@@ -297,7 +297,7 @@ export class World {
         this.emit(u, "checkout.session.completed", { id: "cs_" + id, object: "checkout.session", mode: "subscription", subscription: id, customer: cust(u), client_reference_id: userId(u), metadata: { user_id: userId(u) } });
       }
       // Stripe collects the first payment when a subscription starts active: a paid invoice with an amount (F2).
-      if (status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_0", object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400 });
+      if (status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_0", object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: price } }] } });
     } else if (op.k === "status") {
       if (TERMINAL.has(existing.status) || existing.status === op.status) return;
       if (op.status === "incomplete") return; // only an initial status
@@ -305,7 +305,7 @@ export class World {
       if (op.status === "active") existing.was_active = true;
       this.emit(u, op.status === "canceled" ? "customer.subscription.deleted" : "customer.subscription.updated", this.subObject(existing));
       // Becoming active (trial converted, past_due recovered) means an invoice was paid (F2).
-      if (op.status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_" + this.events.length, object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400 });
+      if (op.status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_" + this.events.length, object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: existing.price } }] } });
     } else if (op.k === "plan") {
       if (TERMINAL.has(existing.status) || existing.price === priceId(op.price)) return;
       existing.price = priceId(op.price);

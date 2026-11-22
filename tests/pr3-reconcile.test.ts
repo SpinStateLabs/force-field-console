@@ -34,7 +34,10 @@ const fetchImpl = (async (u: any) => {
 const deps = () => ({ cfg: stripeConfig()!, fly: fly as any, fetchImpl });
 
 beforeEach(async () => {
-  freshStore();
+  // X2 (#29 r3): a suspended estate resumes only for a subscription with its own paid invoice; these tests are about
+  // the Fly resume mechanics once sub_A / sub_B have paid (the unpaid cases live in trial-estate-first-payment).
+  const st = freshStore();
+  for (const id of ["sub_A", "sub_B"]) await st.setJSON("paid_subscriptions/" + id, { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   readback.delayMs = 3;
   user = await createUser("rec@example.com", "sufficiently-long-pass");
