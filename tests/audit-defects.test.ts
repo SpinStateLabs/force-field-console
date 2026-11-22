@@ -113,7 +113,11 @@ describe("defect 1: subscription events are ordered", () => {
 describe("defect 2: a failed stop never marks the estate suspended", () => {
   let user: User;
   beforeEach(async () => {
-    freshStore();
+    // #29 r4 F1: the tick resumes/revives/retries only for an active subscription with its own paid invoice (mayRunEstate);
+    // these tests are about a customer whose sub_1 has paid (the unpaid case is below / in paid-estate-drivers).
+    const st = freshStore();
+    await st.setJSON("paid_subscriptions/sub_1", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
+    await st.setJSON("paid_subscriptions/sub_2", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
     Object.assign(process.env, FLY_ENV, STRIPE_ENV);
     user = await createUser("stop@example.com", "sufficiently-long-pass");
   });

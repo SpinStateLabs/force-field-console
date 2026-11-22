@@ -35,7 +35,11 @@ let user: User;
 let fly: ModelFly;
 const origDelay = readback.delayMs;
 beforeEach(async () => {
-  freshStore();
+  // #29 r4 F1: the tick resumes/revives only for an active subscription with its own paid invoice (mayRunEstate). These
+  // tests are about the Fly lifecycle of PAYING customers, so every subscription here has paid; the unpaid cases live in
+  // paid-estate-drivers, pr3-defer and pr3-reconcile.
+  const st = freshStore();
+  for (const id of ["sub_1", "sub_A", "sub_B"]) await st.setJSON("paid_subscriptions/" + id, { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   readback.delayMs = 5;
   user = await createUser("pr3@example.com", "sufficiently-long-pass");

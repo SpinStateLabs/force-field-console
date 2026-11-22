@@ -297,7 +297,7 @@ export class World {
         this.emit(u, "checkout.session.completed", { id: "cs_" + id, object: "checkout.session", mode: "subscription", subscription: id, customer: cust(u), client_reference_id: userId(u), metadata: { user_id: userId(u) } });
       }
       // Stripe collects the first payment when a subscription starts active: a paid invoice with an amount (F2).
-      if (status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_0", object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: price } }] } });
+      if (status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_0", object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: price }, amount: 2400 }] }, currency: "cad" });
     } else if (op.k === "status") {
       if (TERMINAL.has(existing.status) || existing.status === op.status) return;
       if (op.status === "incomplete") return; // only an initial status
@@ -305,7 +305,7 @@ export class World {
       if (op.status === "active") existing.was_active = true;
       this.emit(u, op.status === "canceled" ? "customer.subscription.deleted" : "customer.subscription.updated", this.subObject(existing));
       // Becoming active (trial converted, past_due recovered) means an invoice was paid (F2).
-      if (op.status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_" + this.events.length, object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: existing.price } }] } });
+      if (op.status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_" + this.events.length, object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: existing.price }, amount: 2400 }] }, currency: "cad" });
     } else if (op.k === "plan") {
       if (TERMINAL.has(existing.status) || existing.price === priceId(op.price)) return;
       existing.price = priceId(op.price);

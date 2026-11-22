@@ -89,6 +89,19 @@ describe("DESIGN: the webhook queues a resume and returns; the tick starts the m
     expect(fly.machine("m_1").state).toBe("started");
   });
 
+  it("UNPAID (#29 r4 F6): the same re-grant on a subscription with no paid invoice queues nothing and the tick starts nothing", async () => {
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).delete("paid_subscriptions/sub_A");
+    await payingOn("sub_A", "canceled");
+    await estate({ status: "suspended", suspended_from: "ready", suspended_at: "2026-01-01T00:00:00.000Z" });
+    stopQuietly();
+    await handleStripeEvent(ev("a_back", "customer.subscription.updated", 300, sub("sub_A", "active")), deps());
+    expect((await getEstate(user.id))!.resume_pending ?? null).toBeNull();
+    await tick();
+    expect((await getEstate(user.id))!.status).toBe("suspended");
+    expect(fly.machine("m_1").state).toBe("stopped");
+  });
+
   it("an estate with no machine on Fly (nothing to start) is resumed inline", async () => {
     await payingOn("sub_A", "canceled");
     await estate({ status: "suspended", suspended_from: "ready", suspended_at: "2026-01-01T00:00:00.000Z", machine_id: null });

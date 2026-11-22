@@ -11,7 +11,7 @@ import { flyClientOrNull, flyConfig } from "../../src/lib/fly";
 import { advanceEstate, autoRetryFailedEstate, checkEstateHealth, provisionRetryDue, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
 import { userLockAgeMs } from "../../src/lib/locks";
 import { getUserById } from "../../src/lib/users";
-import { flyHeld, isGrantingUser, retryPendingSuspend } from "../../src/lib/billing";
+import { flyHeld, mayRunEstate, retryPendingSuspend } from "../../src/lib/billing";
 import { portalStore } from "../../src/lib/store";
 import { renewalDue } from "../../src/lib/renewal";
 import { kickWorker } from "../../src/lib/worker";
@@ -46,7 +46,7 @@ export default async (_req: Request): Promise<Response> => {
       checkable.map(async (e) => {
         try {
           const owner = await getUserById(e.user_id);
-          if (!isGrantingUser(owner) || flyHeld(owner)) return; // a test-mode grant never starts a machine
+          if (!(await mayRunEstate(owner)) || flyHeld(owner)) return; // only an active, paid subscription (F1); a test-mode grant never starts a machine
           const m = await fly.getMachine(e.app, e.machine_id!, 8000);
           if (m && m.state === "stopped") {
             machineStopped += 1;
@@ -80,7 +80,10 @@ export default async (_req: Request): Promise<Response> => {
   for (const e of estates) {
     if (!e.suspend_pending && !e.resume_pending && e.status !== "suspended") continue;
     const u = await getUserById(e.user_id);
-    if (isGrantingUser(u) && !flyHeld(u)) { // a held (test-mode) user is never resumed; its pending stop is still retried below
+    // F1 (#29 r4): resume/revive ONLY for an active subscription with its own paid invoice (mayRunEstate, the webhook's
+    // rule); a trialing or unpaid grant leaves a suspended estate suspended. A held (test-mode) user is never resumed;
+    // its pending stop is still retried below.
+    if ((await mayRunEstate(u)) && !flyHeld(u)) {
       if (e.resume_pending?.failed) failedResumes += 1;
       if (retryDue(e.resume_pending, now)) work.push(e);
     } else if (e.suspend_pending || e.resume_pending) {
@@ -128,7 +131,7 @@ export default async (_req: Request): Promise<Response> => {
   for (const e of estates) {
     if (e.status !== "error") continue;
     try {
-      if (!isGrantingUser(await getUserById(e.user_id))) continue;
+      if (!(await mayRunEstate(await getUserById(e.user_id)))) continue; // F1: only a paid, active subscription is retried
       provisionFailed += 1;
       if (provisionRetryDue(e, now) && Date.now() - started <= BUDGET_MS && (await autoRetryFailedEstate(e, now))) bump("provision_auto_retry");
     } catch (err: any) {

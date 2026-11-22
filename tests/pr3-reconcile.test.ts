@@ -82,6 +82,22 @@ async function tick() {
 }
 
 describe("MED a: a re-grant reconciles the real machine instead of clearing the flag", () => {
+  it("UNPAID (#29 r4 F6): the same with sub_B never paid: the pending stop is retried, the estate ends suspended, never running", async () => {
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).delete("paid_subscriptions/sub_B");
+    await payingOn("sub_A");
+    await readyEstate();
+    fly.waitNever = true;
+    statuses.sub_A = "canceled";
+    statuses.sub_B = "active";
+    await handleStripeEvent(ev("a_del", "customer.subscription.deleted", 200, sub("sub_A", "canceled")), deps());
+    fly.waitNever = false;
+    await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps());
+    expect((await getEstate(user.id))!.resume_pending ?? null).toBeNull();
+    await retryPendingSuspend(user.id, fly as any, new Date());
+    expect(await final()).toMatchObject({ estate: "suspended", machine: "stopped", sub: "sub_B" });
+  });
+
   it("the wait times out after the stop (machine stopped, autostart off, flag pending); then B is created: the estate must be RUNNING", async () => {
     await payingOn("sub_A");
     await readyEstate();

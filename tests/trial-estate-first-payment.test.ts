@@ -61,7 +61,7 @@ function subEvent(status: string, opts: { livemode?: boolean; periodEnd?: number
   };
 }
 /** F2: Stripe's invoice.paid for sub_t (amount in cents). */
-function invoicePaid(amount: number, opts: { livemode?: boolean; customer?: any; price?: string | null; subscription?: string } = {}) {
+function invoicePaid(amount: number, opts: { livemode?: boolean; customer?: any; price?: string | null; subscription?: string | null; currency?: string; lines?: any[] } = {}) {
   seq += 1;
   const price = opts.price === undefined ? "price_sov" : opts.price;
   return {
@@ -71,8 +71,9 @@ function invoicePaid(amount: number, opts: { livemode?: boolean; customer?: any;
     created: 1_790_000_000 + seq,
     data: {
       object: {
-        id: "in_" + seq, object: "invoice", customer: opts.customer ?? "cus_t", subscription: opts.subscription ?? "sub_t", amount_paid: amount,
-        lines: { data: price ? [{ price: { id: price } }] : [] },
+        id: "in_" + seq, object: "invoice", customer: opts.customer ?? "cus_t", subscription: opts.subscription === undefined ? "sub_t" : opts.subscription, amount_paid: amount,
+        currency: opts.currency ?? "cad",
+        lines: { data: opts.lines ?? (price ? [{ price: { id: price }, amount }] : []) },
       },
     },
   };
@@ -478,5 +479,49 @@ describe("review #29 r3: paid means THIS subscription's invoice, on a configured
     await apply(subEvent("active"));
     for (const customer of ["CUS_T", " cus_t", "cus_t "]) await apply(invoicePaid(7200, { customer }));
     expect(await getEstate(user.id)).toBeNull();
+  });
+});
+
+// Review #29 r4 F5: what counts as the first payment of the tier.
+describe("review #29 r4 F5: the payment must be on the tier line, in the price book currency, and never dropped", () => {
+  const unmatched = async (evId: string) => {
+    const { portalStore } = await import("../src/lib/store");
+    return (await portalStore()).get("ops/unmatched_events/" + evId, { type: "json" });
+  };
+
+  it("F5a: a tier line discounted to zero next to a PAID pack line is not a payment of the tier", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(1200, { lines: [{ price: { id: "price_sov" }, amount: 0 }, { price: { id: "price_pack_x" }, amount: 1200 }] }));
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(false);
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("F5a control: the same invoice with an amount on the tier line counts", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(8400, { lines: [{ price: { id: "price_sov" }, amount: 7200 }, { price: { id: "price_pack_x" }, amount: 1200 }] }));
+    expect(await getEstate(user.id)).not.toBeNull();
+  });
+
+  it("F5b: a paid tier invoice in another currency starts nothing and is recorded as unmatched", async () => {
+    await apply(subEvent("active"));
+    const ev = invoicePaid(7200, { currency: "usd" });
+    expect((await apply(ev)).handled).toBe(false);
+    const { isPaidSubscription } = await import("../src/lib/billing");
+    expect(await isPaidSubscription("sub_t")).toBe(false);
+    expect(await getEstate(user.id)).toBeNull();
+    expect(await unmatched(ev.id)).toBeTruthy();
+  });
+
+  it("F5c: a paid tier invoice with no subscription reference is recorded as unmatched (ALERT), answered 200", async () => {
+    const ev = invoicePaid(7200, { subscription: null });
+    expect((await apply(ev)).handled).toBe(false);
+    expect(await unmatched(ev.id)).toBeTruthy();
+  });
+
+  it("F5c: an invoice with nothing paid and no subscription is not a lost payment (no unmatched record)", async () => {
+    const ev = invoicePaid(0, { subscription: null });
+    await apply(ev);
+    expect(await unmatched(ev.id)).toBeNull();
   });
 });
