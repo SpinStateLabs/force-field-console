@@ -138,16 +138,16 @@ export function encodeForm(params: Record<string, string | number | boolean | un
 
 export async function stripeRequest(
   cfg: StripeConfig,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   params?: Record<string, string | number | boolean | undefined>,
   fetchImpl: FetchLike = fetch,
   idempotencyKey?: string,
 ): Promise<any> {
   const headers: Record<string, string> = { authorization: `Bearer ${cfg.secret_key}` };
-  if (idempotencyKey && method === "POST") headers["idempotency-key"] = idempotencyKey;
+  if (idempotencyKey && method !== "GET") headers["idempotency-key"] = idempotencyKey;
   let body: string | undefined;
-  if (method === "POST") {
+  if (method !== "GET") {
     headers["content-type"] = "application/x-www-form-urlencoded";
     body = encodeForm(params ?? {});
   }

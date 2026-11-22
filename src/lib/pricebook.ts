@@ -22,8 +22,9 @@ export const PRICE_BOOK = {
   },
   /** [Don 2026-11-21] contact sales (no self-serve checkout): 32 per seat, minimum 25 seats; pool sized by contract. */
   enterprise: { seat_month: 32, min_seats: 25 },
-  /** [Don structure, rec numbers] top-up pack: +20 agents to the pool for the billing period, a second subscription item. */
-  pack: { agents: 20, month: 12 },
+  /** [Don structure, rec numbers] top-up pack: +20 agents to the pool for the billing period, a second subscription item;
+   *  max_packs [rec] caps one account's self-serve packs (more goes through sales). */
+  pack: { agents: 20, month: 12, max_packs: 50 },
 } as const;
 
 export type SelfServeTier = keyof typeof PRICE_BOOK.tiers;
