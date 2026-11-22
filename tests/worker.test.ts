@@ -223,6 +223,7 @@ describe("worker and tick functions", () => {
 
       // Another estate failed on that image: the rollout halts (no kick for anyone).
       const other = await createUser("failed@example.com", "sufficiently-long-pass");
+      await payingFixture(other, "sub_2"); // #29 r7: a paying owner, so the health pass probes it (an ineligible owner's stopped machine is not probed)
       const b = await readyEstate(other, "registry.fly.io/x:y");
       b.upgrade_failed_image = "registry.fly.io/x:z";
       await saveEstate(b);

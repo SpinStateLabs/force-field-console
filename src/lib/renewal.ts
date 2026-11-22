@@ -64,7 +64,7 @@ export async function renewSelfAgents(e: Estate, fly: FlyClient, now: Date = new
     "renew",
     launched
       ? "self-agent tokens renewed (30 d) and applied; machine restarted"
-      : "self-agent tokens renewed (30 d); the machine is stopped and stays stopped: they apply at the next permitted start",
+      : "self-agent tokens renewed (30 d); the machine is stopped: it stays stopped until our next permitted start or until Fly autostart wakes it on traffic, and the tokens apply then",
     now,
   );
   await saveEstate(e, now);

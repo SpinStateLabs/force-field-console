@@ -701,7 +701,14 @@ export async function advanceEstate(
         break;
       }
       case "arm": {
-        await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", signer));
+        const { launched } = await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", signer));
+        if (!launched) {
+          // r7 F3: the owner stopped qualifying while this step ran; the armed config is staged (skip_launch). The step stays
+          // at arm (the provisioning gate parks the record) and is re-run, with a launch, once the owner qualifies again.
+          logEstate(e, "arm", "armed config staged on the stopped machine (not started: the subscription may not run an estate); re-run when it may", now);
+          await saveEstate(e, now);
+          return { estate: e, outcome: "idle", note: PARKED_NOTE };
+        }
         e.posture = { enforce: true, tool_check: true, require_signing: true, attest_signing: true };
         nextStep(e, "machine updated to the armed posture (signing required, attest signing, gateway enforce + tool check); restarting", now);
         break;
@@ -1373,7 +1380,7 @@ export async function setEstateAnthropicKey(e: Estate, fly: FlyClient, key: stri
     "anthropic_key",
     launched
       ? "ANTHROPIC_API_KEY set on the estate; machine restarted to apply"
-      : "ANTHROPIC_API_KEY set on the estate; the machine is stopped and stays stopped: it applies at the next permitted start",
+      : "ANTHROPIC_API_KEY set on the estate; the machine is stopped: it stays stopped until our next permitted start or until Fly autostart wakes it on traffic, and the key applies then",
     now,
   );
   await saveEstate(e, now);
@@ -1450,7 +1457,7 @@ export function markEstateAppMissing(e: Estate, now: Date = new Date()): void {
   e.health = { ok: false, checked_at: now.toISOString(), note: "Fly app missing" };
 }
 
-export type HealthOutcome = "ok" | "unhealthy" | "app_missing" | "skipped";
+export type HealthOutcome = "ok" | "unhealthy" | "app_missing" | "skipped" | "stopped_owner_ineligible";
 
 /**
  * One health look at a ready estate (the scheduled tick's job): the app must
@@ -1472,8 +1479,16 @@ export async function checkEstateHealth(
     await saveEstate(e, now);
     return "app_missing";
   }
+  // r7 F1: our probe goes through the Fly proxy, and autostart would wake a STOPPED machine. For an owner who may not run
+  // an estate (mayRunEstate) the probe is not sent while the machine is not running: nothing is written, the outcome says
+  // why. (The customer's own traffic may still wake it through autostart: the accepted dunning window.)
+  let machine: Awaited<ReturnType<FlyClient["getMachine"]>> | null = null;
+  if (e.machine_id && !(await mayRunEstateFor(e.user_id))) {
+    machine = await fly.getMachine(e.app, e.machine_id, 8000);
+    if (!machineRunning(machine)) return "stopped_owner_ineligible";
+  }
   if (!e.image && e.machine_id) {
-    const m = await fly.getMachine(e.app, e.machine_id, 8000);
+    const m = machine ?? (await fly.getMachine(e.app, e.machine_id, 8000));
     if (m?.config?.image) e.image = m.config.image;
   }
   const led = await healthJson(e.url ?? estateOrigin(e.app), "/ledger/health", fetchImpl);
@@ -1519,14 +1534,23 @@ export async function upgradeEstateImage(
   if (!(await mayRunEstateFor(e.user_id)) && !machineRunning(await fly.getMachine(e.app, e.machine_id))) {
     const already = e.upgrade_deferred?.image === target;
     e.upgrade_deferred = { image: target, at: now.toISOString() };
-    if (!already) logEstate(e, "upgrade", `image ${target} deferred: the machine is stopped and the subscription may not start it; applied at the next permitted start`, now);
+    if (!already) logEstate(e, "upgrade", `image ${target} not applied: the machine is stopped and the subscription may not start it; retried after the next start`, now);
     await saveEstate(e, now);
     return { estate: e, outcome: "unchanged" };
   }
   const from = e.image ?? "unknown";
   logEstate(e, "upgrade", `updating the machine image ${from} -> ${target}${opts.force ? " (forced re-apply)" : ""}; armed posture re-verified afterwards`, now);
   await saveEstate(e, now);
-  await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor)));
+  const { launched } = await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor)));
+  if (!launched) {
+    // r7 F3: the check inside the lock staged the update (the machine stopped, or the owner stopped qualifying, after the
+    // pre-check). Not a failed rollout: no posture poll (it would wake the machine through autostart and then halt the
+    // fleet rollout on upgrade_failed_image); deferred like the pre-check case.
+    e.upgrade_deferred = { image: target, at: now.toISOString() };
+    logEstate(e, "upgrade", `image ${target} staged on the stopped machine, not started (the subscription may not start it); retried after the next start`, now);
+    await saveEstate(e, now);
+    return { estate: e, outcome: "unchanged" };
+  }
 
   const origin = e.url ?? estateOrigin(e.app);
   const polls = opts.polls ?? 60;
