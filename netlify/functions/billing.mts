@@ -23,7 +23,7 @@ import {
 } from "../../src/lib/stripe";
 import { checkoutIdempotencyKey, claimPacks, newPacksIdempotencyKey, releasePacks, claimCheckout, claimEvent, eventDone, handleStripeEvent, markProcessed, releaseCheckout, releaseEvent } from "../../src/lib/billing";
 import { flyClientOrNull } from "../../src/lib/fly";
-import { PRICE_BOOK, seatBounds } from "../../src/lib/pricebook";
+import { PRICE_BOOK, maxPacksFor, seatBounds } from "../../src/lib/pricebook";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -209,6 +209,16 @@ export default async (req: Request, _context: Context): Promise<Response> => {
         const existing = packItems[0];
         const current = existing ? (Number.isInteger(existing.quantity) ? existing.quantity : 1) : 0;
         if (packs === current) return json(200, { packs, changed: false });
+        // Rev 4: at most one pack per seat (and max_packs). Raising past it is refused; lowering is always allowed, so an
+        // account over the cap (seats lowered in the portal) can get back under it.
+        const seats = Number.isInteger((tierItem as any)?.quantity) ? (tierItem as any).quantity : 1;
+        const cap = maxPacksFor(seats);
+        if (packs > current && packs > cap) {
+          return new Response(
+            JSON.stringify({ error: { code: "packs_over_seats", message: `At most one pack per seat: with ${seats} seats you can hold ${cap} packs.`, max_packs: cap } }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
         const key = newPacksIdempotencyKey();
         if (existing && packs > 0) {
           await stripeRequest(cfg, "POST", "/v1/subscription_items/" + encodeURIComponent(existing.id), { quantity: packs, proration_behavior: "create_prorations" }, fetch, key);

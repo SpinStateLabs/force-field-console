@@ -91,9 +91,9 @@ describe("setting the number of packs", () => {
 
   it("an existing pack item: its quantity is updated", async () => {
     await subscribed("active", [item("si_seat", "price_sov", 3), item("si_pack", "price_pack", 1)]);
-    expect((await post({ packs: 4 })).status).toBe(200);
+    expect((await post({ packs: 3 })).status).toBe(200); // rev 4: at most one pack per seat (3 seats)
     expect(writes()[0]).toMatchObject({ method: "POST", path: "/v1/subscription_items/si_pack" });
-    expect(writes()[0].params.get("quantity")).toBe("4");
+    expect(writes()[0].params.get("quantity")).toBe("3");
   });
 
   it("0 removes the pack item; 0 with none is a no-op", async () => {
@@ -221,7 +221,7 @@ describe("review r1 fixes", () => {
     await subscribed();
     expect((await post({ packs: 2 })).status).toBe(200);
     await subscribed("active", [item("si_seat", "price_sov", 3), item("si_new", "price_pack", 2)]);
-    expect((await post({ packs: 5 })).status).toBe(200);
+    expect((await post({ packs: 3 })).status).toBe(200); // rev 4: within one pack per seat (3 seats)
   });
 
   it("(d) the claim is released when Stripe refuses the write", async () => {
@@ -252,6 +252,6 @@ describe("review r1 fixes", () => {
     const { join } = await import("node:path");
     const html = readFileSync(join(__dirname, "..", "public/app.html"), "utf8");
     expect(html).toContain(`max="${PRICE_BOOK.pack.max_packs}"`);
-    expect(html).toContain(`(+${PRICE_BOOK.pack.agents} agents for CA$${PRICE_BOOK.pack.month}/mo each)`);
+    expect(html).toContain(`(+${PRICE_BOOK.pack.agents} agents for CA$${PRICE_BOOK.pack.month}/mo each, one per seat)`);
   });
 });

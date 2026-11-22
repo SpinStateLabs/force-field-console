@@ -26,7 +26,7 @@ import {
 } from "./stripe";
 import { getEstate, holdForTestMode, markResumePending, queueEstate, recordResumeFailure, recordReverifyFailure, releaseTestHold, resumeEstate, reverifyBackoffUntil, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
-import { agentPool, seatBounds } from "./pricebook";
+import { agentPool, maxPacksFor, seatBounds } from "./pricebook";
 
 export type WebhookDeps = {
   cfg: StripeConfig;
@@ -336,6 +336,13 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   if (belowMin && !(prior?.seats_below_minimum && prior.subscription_id === sub.id && prior.seats === seats)) {
     console.error("ALERT seats_below_minimum", JSON.stringify({ key: "seats_below_minimum", user_id: user.id, subscription_id: sub.id, tier: seatTier, seats }));
   }
+  // Rev 4: at most one pack per seat. More packs than that (seats lowered in the Stripe portal, which this code cannot
+  // refuse) are not counted in agent_pool; flagged and alerted once per (subscription, seats, packs). Whether the
+  // excess keeps billing is a pricing decision, not made here.
+  const packsOver = seatTier !== null && packs > maxPacksFor(seats);
+  if (packsOver && !(prior?.packs_over_seats && prior.subscription_id === sub.id && prior.seats === seats && prior.packs === packs)) {
+    console.error("ALERT packs_over_seats", JSON.stringify({ key: "packs_over_seats", user_id: user.id, subscription_id: sub.id, seats, packs, max_packs: maxPacksFor(seats) }));
+  }
   user.tier = tier;
   user.billing = {
     customer_id: String(sub.customer),
@@ -350,6 +357,7 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     ...(deps.provision === true ? {} : { test_mode: true as const }),
     ...(seatTier !== null ? { seats, packs, agent_pool: agentPool(seatTier, seats, packs) } : {}),
     ...(belowMin ? { seats_below_minimum: true as const } : {}),
+    ...(packsOver ? { packs_over_seats: true as const } : {}),
   };
   await saveUser(user);
   await store.setJSON("stripe_customers/" + sub.customer, { user_id: user.id });
