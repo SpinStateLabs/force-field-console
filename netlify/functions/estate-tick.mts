@@ -8,7 +8,7 @@
 // production deploy (never in previews). Logs counts only.
 import type { Config } from "@netlify/functions";
 import { flyClientOrNull, flyConfig } from "../../src/lib/fly";
-import { advanceEstate, autoRetryFailedEstate, checkEstateHealth, provisionRetryDue, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
+import { UPGRADE_DEFER_MS, advanceEstate, autoRetryFailedEstate, checkEstateHealth, provisionRetryDue, configWriteMarks, listEstates, markResumePending, retryDue, workerActive } from "../../src/lib/estates";
 import { userLockAgeMs } from "../../src/lib/locks";
 import { getUserById } from "../../src/lib/users";
 import { flyHeld, mayRunEstate, retryPendingSuspend } from "../../src/lib/billing";
@@ -183,7 +183,10 @@ export default async (_req: Request): Promise<Response> => {
   // the two anyway; this just avoids a pointless kick).
   const target = flyConfig()?.image;
   const halted = Boolean(target) && estates.some((e) => e.upgrade_failed_image === target);
-  const drifted = ready.filter((e) => e.status === "ready" && e.image && target && e.image !== target && e.upgrade_failed_image !== target && !renewalDue(e, now));
+  // r6 C2: an upgrade deferred for an owner who may not start the machine is looked at again only after UPGRADE_DEFER_MS,
+  // so it never blocks the rollout of the other estates (only drifted[0] is kicked per tick).
+  const deferred = (e: (typeof ready)[number]) => e.upgrade_deferred?.image === target && now.getTime() - Date.parse(e.upgrade_deferred!.at) < UPGRADE_DEFER_MS;
+  const drifted = ready.filter((e) => e.status === "ready" && e.image && target && e.image !== target && e.upgrade_failed_image !== target && !deferred(e) && !renewalDue(e, now));
   if (halted) bump("upgrade_halted");
   else if (drifted.length && Date.now() - started <= BUDGET_MS) {
     bump((await kickWorker(drifted[0].user_id, "upgrade")) ? "upgrade_kicked" : "upgrade_kick_failed");

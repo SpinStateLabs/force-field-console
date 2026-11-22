@@ -5,7 +5,9 @@
 //
 // Reads (never prints) from the environment: STRIPE_SECRET_KEY and the STRIPE_PRICE_* / STRIPE_WEBHOOK_SECRET values the
 // site uses (stripeConfig), NETLIFY_SITE_ID and NETLIFY_AUTH_TOKEN (to open the site's "portal" blob store). A LIVE-mode
-// Stripe key is refused: this backfill is for the test-mode estate only.
+// Stripe key is refused: this backfill is for the test-mode estate only (production runs Stripe TEST mode today). Going
+// live later needs a live-mode backfill behind an explicit flag; there is no such flag now. The first output line names
+// the Stripe mode and the Netlify site the run reads.
 // Dry run: one "subscription" line per current AND remembered (billing.other_subs) subscription of every estate's owner
 // (user id, subscription id and status, the qualifying paid invoice, the action and the record it WOULD write), one
 // "estate" line per estate with what the new rule does to it once those records exist (runs / parked / suspended on
@@ -41,6 +43,14 @@ async function main(): Promise<number> {
   const token = process.env.NETLIFY_AUTH_TOKEN;
   if (!siteID || !token) {
     console.error("backfill: NETLIFY_SITE_ID and NETLIFY_AUTH_TOKEN are required to open the site's portal store");
+    return 2;
+  }
+  // First line of every run: which Stripe mode and which Netlify site this run reads (C1). The mode comes from the key's
+  // prefix (live keys were refused above); the site id is not a secret. Neither value of a key or token is printed.
+  const stripeMode = /^(sk|rk)_test_/.test(cfg.secret_key) ? "test" : "unknown";
+  console.log(JSON.stringify({ kind: "target", stripe_mode: stripeMode, netlify_site: siteID, store: "portal", mode: apply ? "apply" : "dry-run" }));
+  if (stripeMode !== "test") {
+    console.error("backfill: the Stripe key is not a test-mode key; refusing");
     return 2;
   }
   installScriptStore(kvFromBlobStore(getStore({ name: "portal", siteID, token, consistency: "strong" })));

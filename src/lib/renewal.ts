@@ -57,9 +57,16 @@ export async function renewSelfAgents(e: Estate, fly: FlyClient, now: Date = new
     secrets[agent.secret] = String(out.token_id);
   }
   await fly.setSecrets(e.app, secrets);
-  await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
+  const { launched } = await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
   for (const agent of SELF_AGENTS) e.self_agents[agent.id] = { provisioned_at: now.toISOString() };
-  logEstate(e, "renew", "self-agent tokens renewed (30 d) and applied; machine restarted", now);
+  logEstate(
+    e,
+    "renew",
+    launched
+      ? "self-agent tokens renewed (30 d) and applied; machine restarted"
+      : "self-agent tokens renewed (30 d); the machine is stopped and stays stopped: they apply at the next permitted start",
+    now,
+  );
   await saveEstate(e, now);
   return e;
 }

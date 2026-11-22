@@ -88,6 +88,9 @@ export type Estate = {
   anthropic_key_set_at: string | null;
   /** The engine image the machine runs (recorded at launch/upgrade; null on records older than this field). */
   image: string | null;
+  /** r6 C2: an image upgrade that could not START the stopped machine of an owner who may not run an estate; the tick
+   *  looks at it again after UPGRADE_DEFER_MS (never blocking the rollout of other estates meanwhile). */
+  upgrade_deferred?: { image: string; at: string } | null;
   health: EstateHealth | null;
   /** An image that failed to reach the armed posture on this estate; the tick will not retry it. */
   upgrade_failed_image: string | null;
@@ -1247,15 +1250,17 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
  * estate INSIDE it and refuses when it is suspended or has a suspension pending, so a stale config
  * (autostart on) can never land after a completed suspend. With `readCurrent` the machine's current
  * config is read inside the lock too (never a copy read earlier). Updating a running machine restarts
- * it, which is the intent here (secrets / image / posture take effect); skip_launch is only for the
- * suspend / resume paths.
+ * it, which is the intent here (secrets / image / posture take effect).
+ * Review #29 r6 C2: a STOPPED machine is started by such a write only when the owner may run an estate (mayRunEstate:
+ * active AND this subscription paid). Otherwise the write is staged with skip_launch and takes effect at the next
+ * permitted start; the result says whether the machine was launched.
  */
 export async function updateMachineGuarded(
   e: Estate,
   fly: FlyClient,
   build: (current: MachineConfig | null) => MachineConfig,
   opts: { readCurrent?: boolean } = {},
-): Promise<void> {
+): Promise<{ launched: boolean }> {
   const run = async () => {
     const fresh = await getEstate(e.user_id);
     if (!fresh || fresh.status === "suspended" || fresh.suspend_pending) {
@@ -1264,18 +1269,36 @@ export async function updateMachineGuarded(
     const id = fresh.machine_id ?? e.machine_id;
     if (!id) throw new EstateError(409, "estate_not_ready", "The estate has no machine.");
     let current: MachineConfig | null = null;
+    let machine: { state?: string } | null = null;
     if (opts.readCurrent) {
-      current = (await fly.getMachine(e.app, id))?.config ?? null;
+      machine = await fly.getMachine(e.app, id);
+      current = (machine as any)?.config ?? null;
       if (!current) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
+    }
+    // C2: only an owner who may run an estate gets a stopped machine started by this write.
+    let skipLaunch = false;
+    if (!(await mayRunEstateFor(e.user_id))) {
+      if (!machine) machine = await fly.getMachine(e.app, id);
+      skipLaunch = !machineRunning(machine);
     }
     const config = build(current);
     // Persisted BEFORE the slow call: if it times out or this function is killed, Fly may still apply the
     // update after the lock is gone, even after a suspension (CX2); the mark makes the tick re-verify.
     await (await portalStore()).setJSON(configWriteKey(e.user_id), { at: new Date().toISOString() });
-    await fly.updateMachine(e.app, id, config);
+    if (skipLaunch) await fly.updateMachine(e.app, id, config, { skipLaunch: true });
+    else await fly.updateMachine(e.app, id, config);
+    return { launched: !skipLaunch };
   };
   return withUserLock(e.user_id, run);
 }
+
+/** A machine Fly reports as running (or already starting): a config write restarts it rather than starting it. */
+function machineRunning(m: { state?: string } | null): boolean {
+  return m?.state === "started" || m?.state === "starting";
+}
+
+/** How long a deferred image upgrade waits before the tick considers that estate again (r6 C2). */
+export const UPGRADE_DEFER_MS = 60 * 60_000;
 
 /**
  * Machine-config writes that may still be applied by Fly (one record per user: the start of the latest
@@ -1343,9 +1366,16 @@ export async function setEstateAnthropicKey(e: Estate, fly: FlyClient, key: stri
   if (e.status !== "ready") throw new EstateError(409, "estate_not_ready", "The estate must be ready before a key can be placed.");
   const k = validateAnthropicKey(key);
   await fly.setSecrets(e.app, { ANTHROPIC_API_KEY: k });
-  await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
+  const { launched } = await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
   e.anthropic_key_set_at = now.toISOString();
-  logEstate(e, "anthropic_key", "ANTHROPIC_API_KEY set on the estate; machine restarted to apply", now);
+  logEstate(
+    e,
+    "anthropic_key",
+    launched
+      ? "ANTHROPIC_API_KEY set on the estate; machine restarted to apply"
+      : "ANTHROPIC_API_KEY set on the estate; the machine is stopped and stays stopped: it applies at the next permitted start",
+    now,
+  );
   await saveEstate(e, now);
   return e;
 }
@@ -1483,6 +1513,16 @@ export async function upgradeEstateImage(
   if (e.status !== "ready" || !e.machine_id || !e.volume_id) throw new EstateError(409, "estate_not_ready", "Only a ready estate can change image.");
   const target = cfg.image;
   if (!opts.force && e.image === target) return { estate: e, outcome: "unchanged" };
+  // r6 C2: an upgrade restarts the machine. For an owner who may not run an estate, a STOPPED machine is left alone:
+  // no write (updateMachineGuarded would only stage it) and no 5-minute posture poll that would mark the rollout as
+  // failed; the estate is deferred and looked at again after UPGRADE_DEFER_MS. (Checked again inside the lock.)
+  if (!(await mayRunEstateFor(e.user_id)) && !machineRunning(await fly.getMachine(e.app, e.machine_id))) {
+    const already = e.upgrade_deferred?.image === target;
+    e.upgrade_deferred = { image: target, at: now.toISOString() };
+    if (!already) logEstate(e, "upgrade", `image ${target} deferred: the machine is stopped and the subscription may not start it; applied at the next permitted start`, now);
+    await saveEstate(e, now);
+    return { estate: e, outcome: "unchanged" };
+  }
   const from = e.image ?? "unknown";
   logEstate(e, "upgrade", `updating the machine image ${from} -> ${target}${opts.force ? " (forced re-apply)" : ""}; armed posture re-verified afterwards`, now);
   await saveEstate(e, now);
@@ -1510,6 +1550,7 @@ export async function upgradeEstateImage(
       const at = new Date();
       e.image = target;
       e.upgrade_failed_image = null;
+      e.upgrade_deferred = null;
       e.health = { ok: true, checked_at: at.toISOString(), note: `armed on ${target}` };
       logEstate(e, "upgrade", `armed and healthy on ${target} (ledger build ${p.ledger?.build_sha ?? "?"})`, at);
       await saveEstate(e, at);

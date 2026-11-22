@@ -99,6 +99,41 @@ describe("F1: the scheduled tick never resumes an estate for an unpaid subscript
     expect(fly.machine("m_1").state).toBe("stopped");
   });
 
+  it("r6: retryPendingSuspend's OWN guard, isolated (no webhook, no tick): a queued resume for an active but unpaid owner is dropped, nothing starts", async () => {
+    await payingOn("sub_U", "active"); // never paid
+    const e = await readyEstate();
+    await saveEstate(Object.assign(e, { status: "suspended", suspended_from: "ready", suspended_at: "2026-11-01T00:00:00Z", resume_pending: { since: "2026-11-01T00:00:00Z", attempts: 0, failed: false, next_retry_at: null } }) as any);
+    fly.machine("m_1").state = "stopped";
+    const r = await retryPendingSuspend(user.id, fly as any, new Date());
+    expect(r.outcome).not.toBe("resumed");
+    const after = (await getEstate(user.id))!;
+    expect(after.status).toBe("suspended");
+    expect(after.resume_pending ?? null).toBeNull();
+    expect(fly.machine("m_1").state).toBe("stopped");
+  });
+
+  it("r6: an estate suspended by the suspend-before-save rule is healed by a LATE invoice.paid: ready again after one tick", async () => {
+    await payingOn("sub_A");
+    await readyEstate();
+    const subB = sub("sub_B", "active");
+    const stripe = (async (url: string) => {
+      const ok = new URL(url).pathname === "/v1/subscriptions/sub_B";
+      return new Response(JSON.stringify(ok ? subB : { error: { message: "no" } }), { status: ok ? 200 : 404, headers: { "content-type": "application/json" } });
+    }) as any;
+    await handleStripeEvent(ev("b_new", "customer.subscription.created", 150, subB), deps(stripe));
+    await handleStripeEvent(ev("a_del", "customer.subscription.deleted", 200, sub("sub_A", "canceled")), deps(stripe));
+    expect((await getUserById(user.id))!.billing).toMatchObject({ subscription_id: "sub_B", status: "active" });
+    const held = (await getEstate(user.id))!;
+    expect(held.status === "suspended" || Boolean(held.suspend_pending)).toBe(true);
+    await tick(); // finishes any pending stop
+    expect(fly.machine("m_1").state).toBe("stopped");
+    const invoice = { id: "in_b", object: "invoice", customer: "cus_1", subscription: "sub_B", amount_paid: 2400, currency: "cad", lines: { data: [{ price: { id: "price_op" }, amount: 2400 }] } };
+    await handleStripeEvent({ id: "evt_inv_b", type: "invoice.paid", created: 400, livemode: true, data: { object: invoice } }, deps(stripe));
+    await tick();
+    expect((await getEstate(user.id))!.status).toBe("ready");
+    expect(fly.machine("m_1").state).toBe("started");
+  });
+
   it("control: once sub_B's own invoice is paid, the estate resumes (webhook queues it, the tick starts it)", async () => {
     await exCustomer();
     await paid("sub_B");
