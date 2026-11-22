@@ -50,6 +50,12 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   // silently falling back to the sandbox (which would mix the tenant's data).
   const route = resolveRoute(user, await getEstate(user.id));
   if (route.kind === "refuse") {
+    if (route.extra) {
+      return new Response(JSON.stringify({ error: { code: route.code, message: route.message, ...route.extra } }), {
+        status: route.status,
+        headers: { "content-type": "application/json" },
+      });
+    }
     return err(route.status, route.code, route.message);
   }
   let estateUrl: string | undefined;

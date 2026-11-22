@@ -6,6 +6,7 @@ import { readSession } from "../../src/lib/session";
 import { getUserById } from "../../src/lib/users";
 import { TIERS } from "../../src/lib/tiers";
 import { getEstate } from "../../src/lib/estates";
+import { trialInfo } from "../../src/lib/trial";
 
 function err(status: number, code: string, message: string): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
@@ -43,6 +44,8 @@ export default async (req: Request, _context: Context): Promise<Response> => {
           }
         : null,
       estate: estate ? { status: estate.status, url: estate.url, step: estate.step } : null,
+      // The trial (null when not trialing): runs on the open-source install until the first payment.
+      trial: trialInfo(user),
     }),
     { status: 200, headers: { "content-type": "application/json" } },
   );

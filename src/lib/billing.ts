@@ -373,7 +373,12 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   //    budget (quiesceBudget) checked between calls (a 404's confirming machine-list call included; an already-suspended
   //    record's re-verify shares the same budget); a call in flight can add up to its own 20 s Fly
   //    timeout. If the function limit cuts it off, the state is a retryable suspend_pending, never lost.
-  if (granting && deps.provision !== true) {
+  if (granting && sub.status === "trialing") {
+    // Owner decision 2026-11-22: a trial gets its dedicated estate at FIRST PAYMENT, never at trial start (live or test
+    // mode). Nothing is queued, resumed or started here; the trial runs on the open-source install and the gateway
+    // refuses the account (trial_no_estate) instead of routing it to the shared sandbox. The first "active" event queues
+    // the estate (queueEstate is create-only, so webhook replays are idempotent).
+  } else if (granting && deps.provision !== true) {
     // Stripe test mode (or an event without a boolean livemode) and no opt-in: record the estate as held and make
     // no Fly call. A NEW record is created held. An EXISTING record that is not yet running (pending_manual,
     // provisioning, error) is held too (review r1 C1), so no driver creates anything more for it; a ready or

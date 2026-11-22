@@ -194,6 +194,12 @@ function renderBilling(me) {
     summary += " Subscription " + b.status + ".";
     if (b.current_period_end) summary += " Current period ends " + fmtTime(b.current_period_end) + ".";
   }
+  // Trial (owner decision 2026-11-22): no hosted estate until the first payment; the trial runs on the open-source install.
+  if (me.trial) {
+    summary += " Trial: " + (me.trial.days_left === null ? "" : me.trial.days_left + " days left. ") +
+      "Your hosted dedicated estate starts with the first payment. Until then, run Force-Field from the open-source install: " +
+      me.trial.install_url;
+  }
   $("billing-summary").textContent = summary;
 
   const configured = flags ? flags.billing_configured === true : null;
