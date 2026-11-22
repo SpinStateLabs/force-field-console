@@ -18,6 +18,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { env, portalStore } from "./store";
 import type { User } from "./users";
+import { trialInfo } from "./trial";
 import { withUserLock } from "./locks";
 import { FlyError, estateMachineConfig, estateOrigin, flyConfig, withAutostart, type FetchLike, type FlyClient, type MachineConfig } from "./fly";
 
@@ -1517,17 +1518,46 @@ export async function upgradeEstateImage(
 export type Route =
   | { kind: "sandbox" }
   | { kind: "estate"; url: string; secret: string }
-  | { kind: "refuse"; status: number; code: string; message: string };
+  | { kind: "refuse"; status: number; code: string; message: string; extra?: Record<string, unknown> };
 
-export function resolveRoute(user: User, estate: Estate | null): Route {
-  if (!estate || estate.status === "pending_manual") return { kind: "sandbox" };
-  if (estate.status === "ready" && estate.url && !estate.suspend_pending) return { kind: "estate", url: estate.url, secret: estateSecret(estate.app) };
-  if (estate.status === "suspended" || estate.suspend_pending) {
+/**
+ * ONE rule (owner decision 2026-11-22 + controller safety condition): only an account with NO paid tier may reach the
+ * shared sandbox, which has no account-level tenant isolation. A paid (or trialing) account gets its own READY estate or
+ * a refusal, in every other state: trialing (403 trial_no_estate: the trial runs on the open-source install), no record
+ * yet, pending_manual, a Stripe test-mode hold (503 estate_not_ready with a fixed reason), provisioning, suspended, error.
+ */
+export function resolveRoute(user: User, estate: Estate | null, now: Date = new Date()): Route {
+  if (estate && estate.status === "ready" && estate.url && !estate.suspend_pending) return { kind: "estate", url: estate.url, secret: estateSecret(estate.app) };
+  if (estate && (estate.status === "suspended" || estate.suspend_pending)) {
     return { kind: "refuse", status: 403, code: "estate_suspended", message: "Your dedicated estate is suspended (subscription not active). Its data is kept; reactivate billing to resume." };
   }
-  if (estate.status === "error") {
+  if (estate && estate.status === "error") {
     return { kind: "refuse", status: 503, code: "estate_error", message: "Your dedicated estate failed to provision; retry from the dashboard or contact Spin State Labs." };
   }
+  if (user.tier !== "sandbox") {
+    const trial = trialInfo(user, now);
+    if (trial) {
+      return {
+        kind: "refuse",
+        status: 403,
+        code: "trial_no_estate",
+        message: "Your trial runs on the open-source install; your hosted dedicated estate starts with the first payment.",
+        extra: { install_url: trial.install_url, days_left: trial.days_left, trial_ends_at: trial.ends_at },
+      };
+    }
+    if (!estate || estate.status === "pending_manual") {
+      const reason = !estate ? "not_queued" : estate.test_hold ? "test_hold" : "pending_manual";
+      return {
+        kind: "refuse",
+        status: 503,
+        code: "estate_not_ready",
+        message: "Your dedicated estate is not ready yet; requests are never sent to the shared sandbox for a paid account.",
+        extra: { reason },
+      };
+    }
+    return { kind: "refuse", status: 503, code: "estate_provisioning", message: `Your dedicated estate is being provisioned (step ${estate.step}); try again in a few minutes.` };
+  }
+  if (!estate || estate.status === "pending_manual") return { kind: "sandbox" };
   return { kind: "refuse", status: 503, code: "estate_provisioning", message: `Your dedicated estate is being provisioned (step ${estate.step}); try again in a few minutes.` };
 }
 

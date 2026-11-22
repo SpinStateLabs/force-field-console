@@ -1,0 +1,197 @@
+// Owner decision (Don, 2026-11-22T02:39Z): a trial gets its dedicated estate at FIRST PAYMENT, not at trial start; the
+// trial runs on the open-source install. Safety condition: a trialing account with no estate record must NOT be routed
+// to the shared sandbox (it has no account-level tenant isolation); it is refused with the trial status, the days left
+// and the open-source install link, and no estate URL, key or token.
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import gateway from "../netlify/functions/gateway.mts";
+import me from "../netlify/functions/me.mts";
+import { freshStore } from "./helpers";
+import { createUser, getUserById, saveUser, type User } from "../src/lib/users";
+import { issueKey } from "../src/lib/keys";
+import { issueSession, sessionCookie } from "../src/lib/session";
+import { stripeConfig } from "../src/lib/stripe";
+import { handleStripeEvent } from "../src/lib/billing";
+import { getEstate } from "../src/lib/estates";
+import { PRICE_BOOK } from "../src/lib/pricebook";
+
+const ctx = {} as any;
+const ENV = {
+  STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_PRICE_OPERATOR: "price_op", STRIPE_PRICE_SOVEREIGN: "price_sov",
+  FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789",
+  ESTATE_URL: "https://sandbox.example", ESTATE_SHARED_SECRET: "sandbox-secret",
+};
+const INSTALL = "https://github.com/SpinStateLabs/Force-Field#install-the-marketplace";
+const DAY = 86_400;
+
+let user: User;
+let fetches: string[];
+let seq = 0;
+beforeEach(async () => {
+  freshStore();
+  Object.assign(process.env, ENV);
+  user = await createUser("trial@example.com", "sufficiently-long-pass");
+  fetches = [];
+  vi.stubGlobal("fetch", async (input: any) => {
+    fetches.push(String(typeof input === "string" ? input : input.url));
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  });
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  for (const k of Object.keys(ENV)) delete process.env[k];
+});
+
+function subEvent(status: string, opts: { livemode?: boolean; periodEnd?: number; type?: string } = {}) {
+  seq += 1;
+  return {
+    id: "evt_t" + seq,
+    livemode: opts.livemode ?? true,
+    type: opts.type ?? "customer.subscription.updated",
+    created: 1_790_000_000 + seq,
+    data: {
+      object: {
+        id: "sub_t", status, customer: "cus_t", metadata: { user_id: user.id },
+        items: { data: [{ price: { id: "price_sov" }, quantity: 3, current_period_end: opts.periodEnd ?? Math.floor(Date.now() / 1000) + 12 * DAY }] },
+      },
+    },
+  };
+}
+const apply = (ev: any) => handleStripeEvent(ev, { cfg: stripeConfig()!, fly: null });
+
+describe("webhook: the estate starts at first payment", () => {
+  it("a trialing grant sets the tier but queues NO estate (live mode, Fly configured)", async () => {
+    await apply(subEvent("trialing"));
+    const u = (await getUserById(user.id))!;
+    expect(u.tier).toBe("sovereign");
+    expect(u.billing?.status).toBe("trialing");
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("a trialing grant in test mode queues no estate either (not even a held one)", async () => {
+    await apply(subEvent("trialing", { livemode: false }));
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("trialing -> active queues the dedicated estate once; replays keep the same record", async () => {
+    await apply(subEvent("trialing"));
+    await apply(subEvent("active"));
+    const first = (await getEstate(user.id))!;
+    expect(first.status).toBe("provisioning");
+    await apply(subEvent("active"));
+    await apply(subEvent("active"));
+    const again = (await getEstate(user.id))!;
+    expect(again.created_at).toBe(first.created_at);
+    expect(again.app).toBe(first.app);
+  });
+
+  it("a trial that ends without payment has nothing to tear down", async () => {
+    await apply(subEvent("trialing"));
+    await apply(subEvent("canceled", { type: "customer.subscription.deleted" }));
+    expect((await getUserById(user.id))!.tier).toBe("sandbox");
+    expect(await getEstate(user.id)).toBeNull();
+  });
+});
+
+describe("gateway: a paid account with no estate is never routed to the shared sandbox", () => {
+  const call = async () => {
+    const key = (await issueKey((await getUserById(user.id))!, "k")).plaintext;
+    return gateway(new Request("http://portal.test/api/v1/registry/agents", { headers: { "x-api-key": key } }), ctx);
+  };
+
+  it("trialing: 403 trial_no_estate with the days left and the open-source install link; nothing proxied", async () => {
+    await apply(subEvent("trialing", { periodEnd: Math.floor(Date.now() / 1000) + 12 * DAY + 60 }));
+    const r = await call();
+    expect(r.status).toBe(403);
+    const text = await r.text();
+    const body = JSON.parse(text);
+    expect(body.error.code).toBe("trial_no_estate");
+    expect(body.error.install_url).toBe(INSTALL);
+    expect(body.error.days_left).toBe(12);
+    expect(fetches).toEqual([]);
+    expect(text).not.toMatch(/sandbox\.example|sandbox-secret|fly\.dev|x-field-auth/);
+  });
+
+  // Controller safety condition (2026-11-22): ONE rule. Only an account with NO paid tier reaches the shared sandbox; a
+  // paid account gets its own READY estate or a refusal, in every not-ready state. One test per state.
+  async function paidActive() {
+    user.tier = "operator";
+    user.billing = { customer_id: "c", subscription_id: "s", status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" };
+    await saveUser(user);
+  }
+  async function expectRefusedNoLeak(status: number, code: string, reason?: string) {
+    const r = await call();
+    expect(r.status).toBe(status);
+    const text = await r.text();
+    const body = JSON.parse(text);
+    expect(body.error.code).toBe(code);
+    if (reason) expect(body.error.reason).toBe(reason);
+    expect(fetches).toEqual([]); // nothing reached ESTATE_URL (or any estate)
+    expect(text).not.toMatch(/sandbox\.example|sandbox-secret|fly\.dev|x-field-auth|master-0123456789/);
+  }
+
+  it("paid, no estate record yet (webhook lag): 503 estate_not_ready (not_queued)", async () => {
+    await paidActive();
+    await expectRefusedNoLeak(503, "estate_not_ready", "not_queued");
+  });
+
+  it("paid, estate pending_manual (provisioning not configured): 503 estate_not_ready (pending_manual)", async () => {
+    await paidActive();
+    const { queueEstate } = await import("../src/lib/estates");
+    delete process.env.FLY_API_TOKEN;
+    const e = await queueEstate((await getUserById(user.id))!);
+    expect(e.status).toBe("pending_manual");
+    process.env.FLY_API_TOKEN = "fo1_test";
+    await expectRefusedNoLeak(503, "estate_not_ready", "pending_manual");
+  });
+
+  it("paid, estate held by a Stripe test-mode grant: 503 estate_not_ready (test_hold)", async () => {
+    await apply(subEvent("active", { livemode: false }));
+    expect((await getEstate(user.id))!.test_hold).toBe(true);
+    await expectRefusedNoLeak(503, "estate_not_ready", "test_hold");
+  });
+
+  it("paid, estate provisioning: still refused (503 estate_provisioning, unchanged)", async () => {
+    await apply(subEvent("active"));
+    expect((await getEstate(user.id))!.status).toBe("provisioning");
+    await expectRefusedNoLeak(503, "estate_provisioning");
+  });
+
+  it("a sandbox account is still routed to the shared sandbox (unchanged)", async () => {
+    const r = await call();
+    expect(r.status).toBe(200);
+    expect(fetches).toEqual(["https://sandbox.example/registry/agents"]);
+  });
+});
+
+describe("/api/me shows the trial", () => {
+  it("trialing: trial {ends_at, days_left, install_url}; no estate", async () => {
+    const end = Math.floor(Date.now() / 1000) + 5 * DAY + 60;
+    await apply(subEvent("trialing", { periodEnd: end }));
+    const cookie = sessionCookie(await issueSession(user.id)).split(";")[0];
+    const body = await (await me(new Request("http://portal.test/api/me", { headers: { cookie } }), ctx)).json();
+    expect(body.estate).toBeNull();
+    expect(body.trial).toEqual({ ends_at: new Date(end * 1000).toISOString(), days_left: 5, install_url: INSTALL });
+  });
+
+  it("not trialing: trial is null", async () => {
+    const cookie = sessionCookie(await issueSession(user.id)).split(";")[0];
+    const body = await (await me(new Request("http://portal.test/api/me", { headers: { cookie } }), ctx)).json();
+    expect(body.trial).toBeNull();
+  });
+});
+
+describe("copy", () => {
+  it("the price book's install link is the one the trial shows", () => {
+    expect(PRICE_BOOK.free.install_url).toBe(INSTALL);
+  });
+
+  it("landing and dashboard say the hosted estate starts with the first payment", () => {
+    const html = readFileSync(join(__dirname, "..", "public/index.html"), "utf8");
+    expect(html).toContain("Your hosted dedicated estate starts with the first payment; the trial runs on the open-source install.");
+    const js = readFileSync(join(__dirname, "..", "public/app.js"), "utf8");
+    expect(js).toContain("me.trial");
+    expect(js).toContain("Your hosted dedicated estate starts with the first payment.");
+  });
+});
