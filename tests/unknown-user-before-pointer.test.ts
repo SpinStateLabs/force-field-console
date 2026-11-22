@@ -64,6 +64,21 @@ describe("CX5 unknown-user-before-pointer", () => {
     const u = (await getUserById(user.id))!;
     expect(u.tier).toBe("operator");
     expect(u.billing).toMatchObject({ customer_id: "cus_1", subscription_id: "sub_3", status: "trialing" });
+    // Trial estate at first payment (#28): a trialing grant gets the tier but NO estate.
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("the same delivery order with a PAID (active) no-metadata subscription grants and queues the estate", async () => {
+    const sub1 = mkSub("sub_1", "incomplete", user.id);
+    const sub3 = mkSub("sub_3", "active", null);
+    const deps = { cfg: stripeConfig()!, fly: null, fetchImpl: stripeWith([sub1, sub3]) as any };
+    const r3 = await handleStripeEvent({ ...ev("evt_3", "customer.subscription.created", 1_700_000_002, sub3), livemode: true }, deps);
+    expect(r3.handled).toBe(true);
+    const r1 = await handleStripeEvent({ ...ev("evt_1", "customer.subscription.created", 1_700_000_000, sub1), livemode: true }, deps);
+    expect(r1.handled).toBe(false);
+    const u = (await getUserById(user.id))!;
+    expect(u.tier).toBe("operator");
+    expect(u.billing).toMatchObject({ customer_id: "cus_1", subscription_id: "sub_3", status: "active" });
     expect(await getEstate(user.id)).not.toBeNull();
   });
 

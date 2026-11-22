@@ -373,11 +373,15 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   //    budget (quiesceBudget) checked between calls (a 404's confirming machine-list call included; an already-suspended
   //    record's re-verify shares the same budget); a call in flight can add up to its own 20 s Fly
   //    timeout. If the function limit cuts it off, the state is a retryable suspend_pending, never lost.
-  if (granting && sub.status === "trialing") {
-    // Owner decision 2026-11-22: a trial gets its dedicated estate at FIRST PAYMENT, never at trial start (live or test
-    // mode). Nothing is queued, resumed or started here; the trial runs on the open-source install and the gateway
-    // refuses the account (trial_no_estate) instead of routing it to the shared sandbox. The first "active" event queues
-    // the estate (queueEstate is create-only, so webhook replays are idempotent).
+  // Owner decision 2026-11-22 + review #29 B2: a dedicated estate is CREATED only on "active" (the first payment), never
+  // on trialing, past_due, incomplete, unpaid or any other granting state. A trial whose first payment fails goes
+  // trialing -> past_due and gets no estate. An account that already has an estate (it paid before) keeps it on past_due:
+  // the branches below then only find the existing record (queueEstate is create-only) and leave it as it was.
+  const noNewEstate = granting && sub.status !== "active" && (sub.status === "trialing" || !(await getEstate(user.id)));
+  if (noNewEstate) {
+    // Nothing is queued, resumed or started here. The gateway refuses the account (trial_no_estate while trialing,
+    // otherwise estate_not_ready) instead of routing it to the shared sandbox. The first "active" event queues the estate
+    // (queueEstate is create-only, so webhook replays are idempotent).
   } else if (granting && deps.provision !== true) {
     // Stripe test mode (or an event without a boolean livemode) and no opt-in: record the estate as held and make
     // no Fly call. A NEW record is created held. An EXISTING record that is not yet running (pending_manual,

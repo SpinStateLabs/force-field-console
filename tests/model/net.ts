@@ -50,7 +50,8 @@ type Version = { from: number; to: number | null; state: string; config: any };
 export type FMachine = { id: string; name: string; app: string; state: string; config: any; history: Version[]; restarts: number; starts: number; wakes: number; createdAt: number };
 export type FApp = { name: string; machines: Map<string, FMachine>; volumes: { id: string; name: string }[]; ips: { address: string; type: string }[]; secrets: Record<string, string>; shared: string | null };
 
-export type StripeSub = { id: string; customer: string; status: string; price: string; user_meta: string | null; created: number };
+/** was_active: the subscription has been "active" (paid) at least once; a dedicated estate exists only after that (#28). */
+export type StripeSub = { id: string; customer: string; status: string; price: string; user_meta: string | null; created: number; was_active?: boolean };
 
 export class Net {
   apps = new Map<string, FApp>();

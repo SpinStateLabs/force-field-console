@@ -94,6 +94,74 @@ describe("webhook: the estate starts at first payment", () => {
   });
 });
 
+// Review #29 B2 (don.reviewer, HIGH): the estate is created on "active" ONLY. A trial whose first payment FAILS goes
+// trialing -> past_due (granting) and must NOT get an estate; an account that already paid keeps its estate on past_due.
+describe("review #29 B2: a NEW estate only on active", () => {
+  for (const status of ["past_due", "incomplete", "unpaid"]) {
+    it(`trialing -> ${status}: no estate (no payment was ever made)`, async () => {
+      await apply(subEvent("trialing"));
+      await apply(subEvent(status));
+      expect(await getEstate(user.id)).toBeNull();
+    });
+  }
+
+  it("past_due without ever being active, in test mode: no estate either (not even a held one)", async () => {
+    await apply(subEvent("trialing", { livemode: false }));
+    await apply(subEvent("past_due", { livemode: false }));
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("trialing -> past_due: the gateway refuses (estate_not_ready) and never routes to the shared sandbox", async () => {
+    await apply(subEvent("trialing"));
+    await apply(subEvent("past_due"));
+    const u = (await getUserById(user.id))!;
+    expect(u.tier).toBe("sovereign"); // past_due still grants the tier (Stripe's retry window)
+    const key = (await issueKey(u, "k")).plaintext;
+    const r = await gateway(new Request("http://portal.test/api/v1/registry/agents", { headers: { "x-api-key": key } }), ctx);
+    expect(r.status).toBe(503);
+    const body = await r.json();
+    expect(body.error.code).toBe("estate_not_ready");
+    expect(body.error.reason).toBe("not_queued");
+    expect(fetches).toEqual([]);
+  });
+
+  it("trialing -> active queues exactly once: a later replay keeps the first record's created_at", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-12-01T00:00:00Z"));
+      await apply(subEvent("trialing"));
+      await apply(subEvent("active"));
+      const created = (await getEstate(user.id))!.created_at;
+      vi.setSystemTime(new Date("2026-12-01T00:05:00Z")); // a re-created record would carry this later time
+      await apply(subEvent("active"));
+      expect((await getEstate(user.id))!.created_at).toBe(created);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("active -> past_due -> active keeps ONE estate (no second record)", async () => {
+    await apply(subEvent("active"));
+    const first = (await getEstate(user.id))!;
+    await apply(subEvent("past_due"));
+    expect((await getEstate(user.id))!.created_at).toBe(first.created_at);
+    await apply(subEvent("active"));
+    const again = (await getEstate(user.id))!;
+    expect(again.created_at).toBe(first.created_at);
+    expect(again.app).toBe(first.app);
+  });
+
+  it("an account that was active and goes past_due keeps its existing estate (no teardown here)", async () => {
+    await apply(subEvent("active"));
+    const e = (await getEstate(user.id))!;
+    await apply(subEvent("past_due"));
+    const after = (await getEstate(user.id))!;
+    expect(after.status).toBe(e.status);
+    expect(after.suspend_pending ?? null).toBeNull();
+    expect((await getUserById(user.id))!.tier).toBe("sovereign");
+  });
+});
+
 describe("gateway: a paid account with no estate is never routed to the shared sandbox", () => {
   const call = async () => {
     const key = (await issueKey((await getUserById(user.id))!, "k")).plaintext;
