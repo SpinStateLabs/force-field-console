@@ -217,7 +217,7 @@ function renderBilling(me) {
   } else {
     show(upOp);
     show(upSov);
-    upSov.textContent = "Upgrade to Estate ($249/mo)";
+    upSov.textContent = "Upgrade to Estate (CA$24/seat/mo, min 3 seats)";
   }
   if (b && b.has_customer) show(manage); else hide(manage);
 }
@@ -225,7 +225,11 @@ function renderBilling(me) {
 async function startCheckout(tier, btn) {
   btn.disabled = true;
   setError($("billing-error"), "");
-  const res = await api("/api/billing/checkout", { method: "POST", body: { tier } });
+  // The server enforces the plan's seat bounds (400 bad_seats with the allowed range, shown below).
+  const res = await api("/api/billing/checkout", {
+    method: "POST",
+    body: { tier, seats: Number($("seat-count").value), interval: $("annual-billing").checked ? "year" : "month" },
+  });
   if (res.status === 200 && res.data && typeof res.data.url === "string") {
     window.location.assign(res.data.url);
     return;

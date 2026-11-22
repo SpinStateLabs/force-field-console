@@ -18,6 +18,7 @@ import {
   listCustomerSubscriptions,
   subscriptionPeriodEnd,
   subscriptionPriceId,
+  subscriptionSeats,
   tierForPrice,
   type FetchLike,
   type StripeConfig,
@@ -25,6 +26,7 @@ import {
 } from "./stripe";
 import { getEstate, holdForTestMode, markResumePending, queueEstate, recordResumeFailure, recordReverifyFailure, releaseTestHold, resumeEstate, reverifyBackoffUntil, reviveEstate, settleConfigWrite, suspendEstate, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
+import { agentPool, seatBounds } from "./pricebook";
 
 export type WebhookDeps = {
   cfg: StripeConfig;
@@ -326,6 +328,14 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
 
   const carried = { ...(user.billing?.other_subs ?? {}) };
   delete carried[sub.id];
+  // Per-seat model: record the seats, packs and the agent pool they give. Below the tier's minimum (a portal change):
+  // the tier is kept (never strand a paying customer) but flagged and alerted once per (subscription, seats).
+  const { seats, packs } = subscriptionSeats(sub, deps.cfg);
+  const seatTier = tier === "operator" || tier === "sovereign" ? tier : null;
+  const belowMin = seatTier !== null && seats < seatBounds(seatTier).min;
+  if (belowMin && !(prior?.seats_below_minimum && prior.subscription_id === sub.id && prior.seats === seats)) {
+    console.error("ALERT seats_below_minimum", JSON.stringify({ key: "seats_below_minimum", user_id: user.id, subscription_id: sub.id, tier: seatTier, seats }));
+  }
   user.tier = tier;
   user.billing = {
     customer_id: String(sub.customer),
@@ -338,6 +348,8 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     ...(Object.keys(carried).length ? { other_subs: carried } : {}),
     ...(unmatched ? { price_unmatched: true as const } : {}),
     ...(deps.provision === true ? {} : { test_mode: true as const }),
+    ...(seatTier !== null ? { seats, packs, agent_pool: agentPool(seatTier, seats, packs) } : {}),
+    ...(belowMin ? { seats_below_minimum: true as const } : {}),
   };
   await saveUser(user);
   await store.setJSON("stripe_customers/" + sub.customer, { user_id: user.id });
@@ -459,11 +471,19 @@ export async function retryPendingSuspend(
 /**
  * Stripe Idempotency-Key for a checkout intent: stable across retries of the same
  * (user, tier, customer) within one claim-TTL bucket, so a retried request replays the same
- * Checkout Session instead of opening another; a new bucket is a new intent.
+ * Checkout Session instead of opening another; a new bucket is a new intent. A different interval or seat count is a
+ * different intent (its own key), so a retry never replays a session at another price or quantity.
  */
-export function checkoutIdempotencyKey(userId: string, tier: string, customerId: string | null, now: Date = new Date()): string {
+export function checkoutIdempotencyKey(
+  userId: string,
+  tier: string,
+  customerId: string | null,
+  now: Date = new Date(),
+  interval: "month" | "year" = "month",
+  seats = 1,
+): string {
   const bucket = Math.floor(now.getTime() / CHECKOUT_CLAIM_TTL_MS);
-  return "checkout-" + createHash("sha256").update(`${userId}|${tier}|${customerId ?? ""}|${bucket}`).digest("hex").slice(0, 32);
+  return "checkout-" + createHash("sha256").update(`${userId}|${tier}|${interval}|${seats}|${customerId ?? ""}|${bucket}`).digest("hex").slice(0, 32);
 }
 
 const grantsTier = (deps: WebhookDeps, s: StripeSubscription) => tierForPrice(deps.cfg, subscriptionPriceId(s, deps.cfg)) !== null && GRANTING_STATUSES.has(s.status);

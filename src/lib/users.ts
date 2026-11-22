@@ -36,6 +36,12 @@ export type Billing = {
    * test-mode opt-in was not set: the tier is granted, but nothing starts, resumes or provisions on Fly for it.
    */
   test_mode?: true;
+  /** Per-seat model (src/lib/pricebook.ts): seats on the tier item, top-up packs, and the governed-agent pool they give. */
+  seats?: number;
+  packs?: number;
+  agent_pool?: number;
+  /** The tier item's quantity is below the tier's minimum (e.g. lowered in the portal): tier kept, flagged and alerted. */
+  seats_below_minimum?: true;
 };
 
 export type User = {

@@ -24,14 +24,23 @@ pricing note from those flags (see "Honest state of this deployment" below).
 
 ## Tiers
 
-| Tier | Requests/min | Requests/day | Price (USD/mo) | Estate |
-| --- | --- | --- | --- | --- |
-| Sandbox | 10 | 200 | 0 | shared sandbox estate (may be wiped) |
-| Operator | 60 | 5,000 | 49 | dedicated estate on Fly.io |
-| Estate | 300 | 50,000 | 249 | dedicated estate on Fly.io |
+| Tier | Requests/min | Requests/day | Price (CAD per seat per month) | Seats | Estate |
+| --- | --- | --- | --- | --- | --- |
+| Open source | | | free | | run it yourself (the pricing page links to the install instructions) |
+| Sandbox (an account before it subscribes) | 10 | 200 | 0 | | shared sandbox estate (may be wiped) |
+| Operator | 60 | 5,000 | 24 | 1 to 2; up to 5 governed agents | dedicated estate on Fly.io |
+| Estate | 300 | 50,000 | 24 | at least 3; 20 governed agents per seat | dedicated estate on Fly.io |
+| Enterprise (contact sales) | | | 32 | at least 25 | by contract |
 
-The prices in `src/lib/tiers.ts` are display copy; what is actually billed is the Stripe Price
-referenced by `STRIPE_PRICE_OPERATOR` / `STRIPE_PRICE_SOVEREIGN`. Only the Stripe webhook writes
+Every price, minimum, trial length and pack size is in ONE object, `src/lib/pricebook.ts` (the pages repeat
+those numbers as copy and `tests/pricing-per-seat.test.ts` fails when they drift). Annual billing is 10% off;
+top-up packs add 20 agents to the pool for CAD 12 per month each, as a second subscription item. What is
+actually billed is the per-seat Stripe Price referenced by `STRIPE_PRICE_OPERATOR` / `STRIPE_PRICE_SOVEREIGN`
+(annual: `*_ANNUAL`), sold with quantity = seats. Checkout enforces the seat bounds server side (`400 bad_seats`),
+gives a 30-day trial on a first subscription (no card up front; it cancels at the end without one), and takes
+`interval: "year"` for annual billing (`501 annual_not_configured` until the annual Price is set). The webhook
+records `seats`, `packs` and `agent_pool` on the account and flags (`ALERT seats_below_minimum`) a quantity below
+the tier minimum without removing the tier. Only the Stripe webhook writes
 a paid tier: a subscription in a granting status (`active`, `trialing`, `past_due`) with a known
 price sets the tier; anything else drops the account to Sandbox.
 
@@ -61,8 +70,10 @@ netlify dev
 | `ESTATE_SHARED_SECRET` | No | Sent to the sandbox estate as `x-field-auth` on proxied requests, when set. |
 | `STRIPE_SECRET_KEY` | For billing | Stripe secret key. Billing is configured only when all four `STRIPE_*` variables are set. |
 | `STRIPE_WEBHOOK_SECRET` | For billing | Signing secret of the `/api/billing/webhook` endpoint (`whsec_…`). |
-| `STRIPE_PRICE_OPERATOR` | For billing | Stripe Price id billed for Operator. |
-| `STRIPE_PRICE_SOVEREIGN` | For billing | Stripe Price id billed for Estate. |
+| `STRIPE_PRICE_OPERATOR` | For billing | Per-seat Stripe Price id billed monthly for Operator (quantity = seats). |
+| `STRIPE_PRICE_SOVEREIGN` | For billing | Per-seat Stripe Price id billed monthly for Estate (quantity = seats). |
+| `STRIPE_PRICE_OPERATOR_ANNUAL` / `STRIPE_PRICE_SOVEREIGN_ANNUAL` | No | Per-seat Price id sold when the tier is paid annually (10% off). Maps to its tier like the monthly Price; without it an annual checkout answers `501 annual_not_configured`. |
+| `STRIPE_PRICE_PACK` / `STRIPE_PRICE_PACK_ANNUAL` | No | Top-up pack Price id (+20 agents per unit), monthly / yearly. Never grants a tier; an id also used for a tier is a shared id and counts as neither. |
 | `STRIPE_PRICE_OPERATOR_ACCEPTED` / `STRIPE_PRICE_SOVEREIGN_ACCEPTED` | No | Further Price ids (comma separated) that map to the tier, e.g. the old Price after a price change or another interval. Never used for Checkout. An id listed for both tiers (sale or accepted) maps to neither: billing stays on, one `ALERT price_config_shared` line is logged, `/api/health` shows `price_config_shared: true`, and Checkout answers `501` for a tier whose own sale Price is shared, until the variables are fixed. |
 | `STRIPE_TEST_MODE_PROVISIONING` | No (default off) | Only the exact value `true` lets a Stripe **test-mode** event (`livemode: false`) provision, resume or start a Fly estate. Unset (or any other value): a test-mode grant sets the tier but queues the estate as `pending_manual` with `test_hold`, which is never promoted, and makes no Fly call; an event whose `livemode` is missing or not a boolean is held the same way even with the opt-in. A later live-mode grant releases the hold. An existing estate that is not yet running (`pending_manual`, `provisioning`, `error`) is held as well; an estate that is already `ready` keeps its maintenance (renewal, image upgrade, health read) but is never started or resumed by a test-mode grant, and a pending suspension is still carried out. |
 | `FLY_API_TOKEN` | For provisioning | Org-scoped Fly token (apps, volumes, machines, IPs, secrets). Provisioning is configured only when this, `FLY_ORG_SLUG`, `FLY_ESTATE_IMAGE` and `ESTATE_SECRET_MASTER` are all set. |

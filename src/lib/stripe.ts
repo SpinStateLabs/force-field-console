@@ -31,16 +31,36 @@ export type StripeConfig = {
    * comma separated. Never used for Checkout.
    */
   accepted?: Record<PaidTier, string[]>;
+  /** Per-seat Price sold when the tier is paid ANNUALLY (STRIPE_PRICE_<TIER>_ANNUAL, optional). Maps to its tier. */
+  annual?: Partial<Record<PaidTier, string>>;
+  /** Top-up pack Prices (+agents; STRIPE_PRICE_PACK / STRIPE_PRICE_PACK_ANNUAL, optional). Never map to a tier. */
+  pack?: { month?: string; year?: string };
 };
 
 function priceList(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-/** Price ids configured for BOTH tiers (primary or accepted), sorted; empty for a sound configuration. */
+/** Every price id that maps to `tier`: the monthly and annual per-seat sale prices and the accepted list. */
+function tierPriceIds(cfg: StripeConfig, tier: PaidTier): string[] {
+  const annual = cfg.annual?.[tier];
+  return [cfg.prices[tier], ...(annual ? [annual] : []), ...(cfg.accepted?.[tier] ?? [])];
+}
+
+/** The configured top-up pack price ids. */
+export function packPriceIds(cfg: StripeConfig): string[] {
+  return [cfg.pack?.month, cfg.pack?.year].filter((id): id is string => Boolean(id));
+}
+
+/**
+ * Price ids configured for MORE THAN ONE purpose (operator, sovereign, pack), sorted; empty for a sound configuration.
+ * Such an id maps to no tier and is never counted as a pack.
+ */
 export function sharedPriceIds(cfg: StripeConfig): string[] {
-  const operatorIds = new Set([cfg.prices.operator, ...(cfg.accepted?.operator ?? [])]);
-  return [...new Set([cfg.prices.sovereign, ...(cfg.accepted?.sovereign ?? [])].filter((id) => operatorIds.has(id)))].sort();
+  const groups = [new Set(tierPriceIds(cfg, "operator")), new Set(tierPriceIds(cfg, "sovereign")), new Set(packPriceIds(cfg))];
+  const seen = new Map<string, number>();
+  for (const g of groups) for (const id of g) seen.set(id, (seen.get(id) ?? 0) + 1);
+  return [...seen].filter(([, n]) => n > 1).map(([id]) => id).sort();
 }
 
 /** Shared-id sets already alerted in this process (stripeConfig runs on every billing and health request). */
@@ -61,6 +81,20 @@ export function stripeConfig(): StripeConfig | null {
   const cfg: StripeConfig = { secret_key, webhook_secret, prices: { operator, sovereign } };
   const accepted = { operator: priceList(env("STRIPE_PRICE_OPERATOR_ACCEPTED")), sovereign: priceList(env("STRIPE_PRICE_SOVEREIGN_ACCEPTED")) };
   if (accepted.operator.length || accepted.sovereign.length) cfg.accepted = accepted;
+  const annualOperator = env("STRIPE_PRICE_OPERATOR_ANNUAL");
+  const annualSovereign = env("STRIPE_PRICE_SOVEREIGN_ANNUAL");
+  if (annualOperator || annualSovereign) {
+    cfg.annual = {};
+    if (annualOperator) cfg.annual.operator = annualOperator;
+    if (annualSovereign) cfg.annual.sovereign = annualSovereign;
+  }
+  const packMonth = env("STRIPE_PRICE_PACK");
+  const packYear = env("STRIPE_PRICE_PACK_ANNUAL");
+  if (packMonth || packYear) {
+    cfg.pack = {};
+    if (packMonth) cfg.pack.month = packMonth;
+    if (packYear) cfg.pack.year = packYear;
+  }
   const shared = sharedPriceIds(cfg);
   if (shared.length && !sharedPriceAlerted.has(shared.join(","))) {
     sharedPriceAlerted.add(shared.join(","));
@@ -75,7 +109,8 @@ export function stripeConfig(): StripeConfig | null {
  */
 export function tierForPrice(cfg: StripeConfig, priceId: string | null | undefined): PaidTier | null {
   if (!priceId) return null;
-  const tiers = (["operator", "sovereign"] as const).filter((t) => priceId === cfg.prices[t] || (cfg.accepted?.[t] ?? []).includes(priceId));
+  if (packPriceIds(cfg).includes(priceId)) return null; // a pack never grants a tier
+  const tiers = (["operator", "sovereign"] as const).filter((t) => tierPriceIds(cfg, t).includes(priceId));
   return tiers.length === 1 ? tiers[0] : null;
 }
 
@@ -149,7 +184,21 @@ export type CheckoutArgs = {
   cancel_url: string;
   /** Stripe Idempotency-Key for the session creation (derived from the checkout claim token). */
   idempotency_key?: string;
+  /** Seats bought: the quantity of the per-seat price (the caller enforces the tier's minimum and maximum). Default 1. */
+  seats?: number;
+  /** "month" (default) sells cfg.prices[tier]; "year" sells cfg.annual[tier]. */
+  interval?: "month" | "year";
+  /**
+   * Free trial days (a first subscription only; the caller decides). With a trial, no card is required up front and
+   * a trial that ends without a payment method CANCELS instead of billing. 0 / absent: no trial, card collected.
+   */
+  trial_days?: number;
 };
+
+/** The per-seat price Checkout sells for a tier and interval; undefined when the annual price is not configured. */
+export function salePrice(cfg: StripeConfig, tier: PaidTier, interval: "month" | "year" = "month"): string | undefined {
+  return interval === "year" ? cfg.annual?.[tier] : cfg.prices[tier];
+}
 
 /** Create a subscription Checkout Session; returns its hosted URL. */
 export async function createCheckoutSession(
@@ -157,10 +206,13 @@ export async function createCheckoutSession(
   args: CheckoutArgs,
   fetchImpl: FetchLike = fetch,
 ): Promise<{ id: string; url: string }> {
+  const price = salePrice(cfg, args.tier, args.interval);
+  if (!price) throw new StripeError(501, "annual_not_configured", "No annual price is configured for this tier.");
+  const seats = Number.isInteger(args.seats) && (args.seats as number) > 0 ? (args.seats as number) : 1;
   const params: Record<string, string | number> = {
     mode: "subscription",
-    "line_items[0][price]": cfg.prices[args.tier],
-    "line_items[0][quantity]": 1,
+    "line_items[0][price]": price,
+    "line_items[0][quantity]": seats,
     success_url: args.success_url,
     cancel_url: args.cancel_url,
     client_reference_id: args.user_id,
@@ -171,6 +223,12 @@ export async function createCheckoutSession(
   };
   if (args.customer_id) params.customer = args.customer_id;
   else params.customer_email = args.email;
+  const trialDays = Number.isInteger(args.trial_days) && (args.trial_days as number) > 0 ? (args.trial_days as number) : 0;
+  if (trialDays > 0) {
+    params["subscription_data[trial_period_days]"] = trialDays;
+    params.payment_method_collection = "if_required";
+    params["subscription_data[trial_settings][end_behavior][missing_payment_method]"] = "cancel";
+  }
   const session = await stripeRequest(cfg, "POST", "/v1/checkout/sessions", params, fetchImpl, args.idempotency_key);
   if (!session?.url || !session?.id) {
     throw new StripeError(502, "stripe_bad_response", "Stripe returned a Checkout Session without a URL.");
@@ -194,10 +252,29 @@ export type StripeSubscription = {
   id: string;
   status: string;
   customer: string;
-  items?: { data?: { price?: { id?: string }; current_period_end?: number }[] };
+  items?: { data?: { price?: { id?: string }; quantity?: number; current_period_end?: number }[] };
   current_period_end?: number;
   metadata?: Record<string, string>;
 };
+
+/**
+ * Seats and packs on a subscription: seats = the quantity of the item whose price maps to a tier (absent quantity = 1),
+ * packs = the summed quantity of the items on a configured pack price. A shared id counts as neither.
+ */
+export function subscriptionSeats(sub: StripeSubscription, cfg: StripeConfig): { seats: number; packs: number } {
+  const qty = (q: unknown) => (Number.isInteger(q) && (q as number) >= 0 ? (q as number) : 1);
+  const shared = new Set(sharedPriceIds(cfg));
+  const packs = new Set(packPriceIds(cfg).filter((id) => !shared.has(id)));
+  let seats = 0;
+  let packCount = 0;
+  for (const item of sub.items?.data ?? []) {
+    const id = item.price?.id;
+    if (!id) continue;
+    if (packs.has(id)) packCount += qty(item.quantity);
+    else if (tierForPrice(cfg, id) !== null) seats = Math.max(seats, qty(item.quantity));
+  }
+  return { seats, packs: packCount };
+}
 
 export async function getSubscription(cfg: StripeConfig, id: string, fetchImpl: FetchLike = fetch): Promise<StripeSubscription> {
   return (await stripeRequest(cfg, "GET", `/v1/subscriptions/${encodeURIComponent(id)}`, undefined, fetchImpl)) as StripeSubscription;
