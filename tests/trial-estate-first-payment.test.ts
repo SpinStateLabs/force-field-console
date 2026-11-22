@@ -43,22 +43,46 @@ afterEach(() => {
   for (const k of Object.keys(ENV)) delete process.env[k];
 });
 
+/** The subscription as Stripe knows it now (the invoice.paid handler reads it live). */
+let liveSub: any = null;
 function subEvent(status: string, opts: { livemode?: boolean; periodEnd?: number; type?: string } = {}) {
   seq += 1;
+  const object = {
+    id: "sub_t", status, customer: "cus_t", metadata: { user_id: user.id },
+    items: { data: [{ price: { id: "price_sov" }, quantity: 3, current_period_end: opts.periodEnd ?? Math.floor(Date.now() / 1000) + 12 * DAY }] },
+  };
+  liveSub = object;
   return {
     id: "evt_t" + seq,
     livemode: opts.livemode ?? true,
     type: opts.type ?? "customer.subscription.updated",
     created: 1_790_000_000 + seq,
-    data: {
-      object: {
-        id: "sub_t", status, customer: "cus_t", metadata: { user_id: user.id },
-        items: { data: [{ price: { id: "price_sov" }, quantity: 3, current_period_end: opts.periodEnd ?? Math.floor(Date.now() / 1000) + 12 * DAY }] },
-      },
-    },
+    data: { object },
   };
 }
-const apply = (ev: any) => handleStripeEvent(ev, { cfg: stripeConfig()!, fly: null });
+/** F2: Stripe's invoice.paid for sub_t (amount in cents). */
+function invoicePaid(amount: number, opts: { livemode?: boolean; customer?: string } = {}) {
+  seq += 1;
+  return {
+    id: "evt_i" + seq,
+    livemode: opts.livemode ?? true,
+    type: "invoice.paid",
+    created: 1_790_000_000 + seq,
+    data: { object: { id: "in_" + seq, object: "invoice", customer: opts.customer ?? "cus_t", subscription: "sub_t", amount_paid: amount } },
+  };
+}
+const stripeLive = async (url: string) => {
+  const u = new URL(url);
+  if (u.pathname === "/v1/subscriptions/sub_t" && liveSub) return new Response(JSON.stringify(liveSub), { status: 200, headers: { "content-type": "application/json" } });
+  if (u.pathname === "/v1/subscriptions") return new Response(JSON.stringify({ object: "list", data: [], has_more: false }), { status: 200, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify({ error: { message: "no such object" } }), { status: 404, headers: { "content-type": "application/json" } });
+};
+const apply = (ev: any) => handleStripeEvent(ev, { cfg: stripeConfig()!, fly: null, fetchImpl: stripeLive as any });
+/** A paying subscription: active, and the first invoice paid with an amount. */
+async function activePaid(opts: { livemode?: boolean } = {}) {
+  await apply(subEvent("active", opts));
+  await apply(invoicePaid(7200, opts));
+}
 
 describe("webhook: the estate starts at first payment", () => {
   it("a trialing grant sets the tier but queues NO estate (live mode, Fly configured)", async () => {
@@ -74,9 +98,9 @@ describe("webhook: the estate starts at first payment", () => {
     expect(await getEstate(user.id)).toBeNull();
   });
 
-  it("trialing -> active queues the dedicated estate once; replays keep the same record", async () => {
+  it("trialing -> active + a paid invoice queues the dedicated estate once; replays keep the same record", async () => {
     await apply(subEvent("trialing"));
-    await apply(subEvent("active"));
+    await activePaid();
     const first = (await getEstate(user.id))!;
     expect(first.status).toBe("provisioning");
     await apply(subEvent("active"));
@@ -130,10 +154,11 @@ describe("review #29 B2: a NEW estate only on active", () => {
     try {
       vi.setSystemTime(new Date("2026-12-01T00:00:00Z"));
       await apply(subEvent("trialing"));
-      await apply(subEvent("active"));
+      await activePaid();
       const created = (await getEstate(user.id))!.created_at;
       vi.setSystemTime(new Date("2026-12-01T00:05:00Z")); // a re-created record would carry this later time
       await apply(subEvent("active"));
+      await apply(invoicePaid(7200)); // a later paid invoice
       expect((await getEstate(user.id))!.created_at).toBe(created);
     } finally {
       vi.useRealTimers();
@@ -141,7 +166,7 @@ describe("review #29 B2: a NEW estate only on active", () => {
   });
 
   it("active -> past_due -> active keeps ONE estate (no second record)", async () => {
-    await apply(subEvent("active"));
+    await activePaid();
     const first = (await getEstate(user.id))!;
     await apply(subEvent("past_due"));
     expect((await getEstate(user.id))!.created_at).toBe(first.created_at);
@@ -152,7 +177,7 @@ describe("review #29 B2: a NEW estate only on active", () => {
   });
 
   it("an account that was active and goes past_due keeps its existing estate (no teardown here)", async () => {
-    await apply(subEvent("active"));
+    await activePaid();
     const e = (await getEstate(user.id))!;
     await apply(subEvent("past_due"));
     const after = (await getEstate(user.id))!;
@@ -215,15 +240,22 @@ describe("gateway: a paid account with no estate is never routed to the shared s
   });
 
   it("paid, estate held by a Stripe test-mode grant: 503 estate_not_ready (test_hold)", async () => {
-    await apply(subEvent("active", { livemode: false }));
+    await activePaid({ livemode: false });
     expect((await getEstate(user.id))!.test_hold).toBe(true);
     await expectRefusedNoLeak(503, "estate_not_ready", "test_hold");
   });
 
   it("paid, estate provisioning: still refused (503 estate_provisioning, unchanged)", async () => {
-    await apply(subEvent("active"));
+    await activePaid();
     expect((await getEstate(user.id))!.status).toBe("provisioning");
     await expectRefusedNoLeak(503, "estate_provisioning");
+  });
+
+  it("F2: active but nothing paid yet (zero-amount invoice): 503 estate_not_ready (awaiting_first_payment)", async () => {
+    await apply(subEvent("active"));
+    await apply(invoicePaid(0));
+    expect(await getEstate(user.id)).toBeNull();
+    await expectRefusedNoLeak(503, "estate_not_ready", "awaiting_first_payment");
   });
 
   it("a sandbox account is still routed to the shared sandbox (unchanged)", async () => {
@@ -261,5 +293,87 @@ describe("copy", () => {
     const js = readFileSync(join(__dirname, "..", "public/app.js"), "utf8");
     expect(js).toContain("me.trial");
     expect(js).toContain("Your hosted dedicated estate starts with the first payment.");
+  });
+});
+
+// Review #29 F2 (roley.reviewer; controller ruling): the trigger is a PAID INVOICE (amount_paid > 0), not the status.
+describe("review #29 F2: the estate starts at the first PAID invoice", () => {
+  it("trialing -> active with a zero-amount invoice (100% coupon): no estate", async () => {
+    await apply(subEvent("trialing"));
+    await apply(subEvent("active"));
+    await apply(invoicePaid(0));
+    expect(await getEstate(user.id)).toBeNull();
+    expect((await getUserById(user.id))!.billing?.first_payment_pending).toBe(true);
+  });
+
+  it("first invoice paid with an amount: exactly one estate; first_payment_pending cleared", async () => {
+    await apply(subEvent("trialing"));
+    await apply(subEvent("active"));
+    expect(await getEstate(user.id)).toBeNull();
+    await apply(invoicePaid(7200));
+    expect((await getEstate(user.id))!.status).toBe("provisioning");
+    expect((await getUserById(user.id))!.billing?.first_payment_pending ?? false).toBe(false);
+  });
+
+  it("order does not matter: invoice.paid first, then the active subscription event, gives the estate", async () => {
+    liveSub = { id: "sub_t", status: "active", customer: "cus_t", metadata: { user_id: user.id }, items: { data: [{ price: { id: "price_sov" }, quantity: 3 }] } };
+    await apply(invoicePaid(7200));
+    expect(await getEstate(user.id)).toBeNull(); // the account is not granted yet
+    await apply(subEvent("active"));
+    expect((await getEstate(user.id))!.status).toBe("provisioning");
+  });
+
+  it("a replayed invoice.paid and a later paid invoice never create a second estate", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-12-02T00:00:00Z"));
+      await apply(subEvent("active"));
+      const first = invoicePaid(7200);
+      await apply(first);
+      const created = (await getEstate(user.id))!.created_at;
+      vi.setSystemTime(new Date("2026-12-02T00:10:00Z"));
+      await apply(first); // replay of the same event
+      await apply(invoicePaid(7200)); // next month's invoice
+      expect((await getEstate(user.id))!.created_at).toBe(created);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("active alone (no invoice.paid at all): no estate", async () => {
+    await apply(subEvent("active"));
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("invoice.paid with amount 0: acknowledged (not an error), no paid record, no estate", async () => {
+    await apply(subEvent("active"));
+    const r = await apply(invoicePaid(0));
+    expect(r.handled).toBe(false);
+    const { isPaidCustomer } = await import("../src/lib/billing");
+    expect(await isPaidCustomer("cus_t")).toBe(false);
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("invoice.paid for an unknown customer: acknowledged, no paid record, no estate", async () => {
+    liveSub = { id: "sub_t", status: "active", customer: "cus_stranger", metadata: {}, items: { data: [{ price: { id: "price_sov" }, quantity: 3 }] } };
+    const r = await apply(invoicePaid(7200, { customer: "cus_stranger" }));
+    expect(r.handled).toBe(false);
+    const { isPaidCustomer } = await import("../src/lib/billing");
+    expect(await isPaidCustomer("cus_stranger")).toBe(false);
+    expect(await getEstate(user.id)).toBeNull();
+  });
+
+  it("the webhook endpoint answers 200 to both (Stripe must not retry them)", async () => {
+    const { signPayload } = await import("../src/lib/stripe");
+    const billing = (await import("../netlify/functions/billing.mts")).default;
+    for (const ev of [invoicePaid(0), invoicePaid(7200, { customer: "cus_stranger" })]) {
+      liveSub = { id: "sub_t", status: "active", customer: ev.data.object.customer, metadata: {}, items: { data: [{ price: { id: "price_sov" }, quantity: 3 }] } };
+      vi.stubGlobal("fetch", stripeLive as any);
+      const raw = JSON.stringify(ev);
+      const sig = signPayload(raw, "whsec_test", Math.floor(Date.now() / 1000));
+      const res = await billing(new Request("http://portal.test/api/billing/webhook", { method: "POST", headers: { "stripe-signature": sig }, body: raw }), ctx);
+      expect(res.status).toBe(200);
+    }
+    expect(await getEstate(user.id)).toBeNull();
   });
 });

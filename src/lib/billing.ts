@@ -358,6 +358,9 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     ...(seatTier !== null ? { seats, packs, agent_pool: agentPool(seatTier, seats, packs) } : {}),
     ...(belowMin ? { seats_below_minimum: true as const } : {}),
     ...(packsOver ? { packs_over_seats: true as const } : {}),
+    // F2: active but no paid invoice seen yet (a zero-amount first invoice, a 100% coupon): no estate; the gateway
+    // refuses with estate_not_ready (awaiting_first_payment). Cleared by the first invoice.paid with an amount.
+    ...(granting && sub.status === "active" && !(await isPaidCustomer(String(sub.customer))) ? { first_payment_pending: true as const } : {}),
   };
   await saveUser(user);
   await store.setJSON("stripe_customers/" + sub.customer, { user_id: user.id });
@@ -373,16 +376,46 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
   //    budget (quiesceBudget) checked between calls (a 404's confirming machine-list call included; an already-suspended
   //    record's re-verify shares the same budget); a call in flight can add up to its own 20 s Fly
   //    timeout. If the function limit cuts it off, the state is a retryable suspend_pending, never lost.
-  // Owner decision 2026-11-22 + review #29 B2: a dedicated estate is CREATED only on "active" (the first payment), never
-  // on trialing, past_due, incomplete, unpaid or any other granting state. A trial whose first payment fails goes
-  // trialing -> past_due and gets no estate. An account that already has an estate (it paid before) keeps it on past_due:
-  // the branches below then only find the existing record (queueEstate is create-only) and leave it as it was.
-  const noNewEstate = granting && sub.status !== "active" && (sub.status === "trialing" || !(await getEstate(user.id)));
-  if (noNewEstate) {
+  // Owner decision 2026-11-22 ("at first payment") + review #29 B2/F2: a dedicated estate is CREATED only when the
+  // subscription is "active" AND a paid invoice (amount_paid > 0) was seen for the customer (paid_customers/<cus>,
+  // written by invoice.paid). "active" alone (a zero-amount invoice, a 100% coupon), trialing, past_due, incomplete
+  // and unpaid create none. An account that already has an estate keeps it: the branches below then only find the
+  // existing record (queueEstate is create-only) and leave it as it was. Order does not matter: if invoice.paid comes
+  // first this event queues the estate; if it comes second, the invoice.paid handler does.
+  if (granting) await ensureEstateOnGrant(user, sub, deps, now);
+  else {
+    const estate = await getEstate(user.id);
+    // "suspended" is included: suspendEstate verifies the machine really is stopped instead of trusting the record
+    if (estate && (estate.status === "ready" || estate.status === "provisioning" || estate.status === "error" || estate.status === "suspended")) {
+      await suspendEstate(estate, deps.fly, now, `subscription ${sub.status}`);
+    }
+  }
+  return tier;
+}
+
+/** Paid-customer record (F2): a paid invoice with amount_paid > 0 was seen for this Stripe customer. Create-only. */
+export const PAID_CUSTOMERS_PREFIX = "paid_customers/";
+export async function isPaidCustomer(customer: string): Promise<boolean> {
+  const store = await portalStore();
+  return Boolean(await store.get(PAID_CUSTOMERS_PREFIX + customer, { type: "json" }));
+}
+async function markPaidCustomer(customer: string, invoiceId: string, now: Date): Promise<void> {
+  const store = await portalStore();
+  await store.setJSONIfNew(PAID_CUSTOMERS_PREFIX + customer, { first_paid_invoice: invoiceId, at: now.toISOString() });
+}
+
+/**
+ * The estate side of a granting subscription. A NEW estate only when the subscription is active and the customer has
+ * paid (see applySubscription); an existing estate is kept (and resumed or held as before).
+ */
+async function ensureEstateOnGrant(user: User, sub: StripeSubscription, deps: WebhookDeps, now: Date): Promise<void> {
+  const mayCreate = sub.status === "active" && (await isPaidCustomer(String(sub.customer)));
+  if (!mayCreate && (sub.status === "trialing" || !(await getEstate(user.id)))) {
     // Nothing is queued, resumed or started here. The gateway refuses the account (trial_no_estate while trialing,
-    // otherwise estate_not_ready) instead of routing it to the shared sandbox. The first "active" event queues the estate
-    // (queueEstate is create-only, so webhook replays are idempotent).
-  } else if (granting && deps.provision !== true) {
+    // otherwise estate_not_ready) instead of routing it to the shared sandbox.
+    return;
+  }
+  if (deps.provision !== true) {
     // Stripe test mode (or an event without a boolean livemode) and no opt-in: record the estate as held and make
     // no Fly call. A NEW record is created held. An EXISTING record that is not yet running (pending_manual,
     // provisioning, error) is held too (review r1 C1), so no driver creates anything more for it; a ready or
@@ -391,21 +424,49 @@ export async function applySubscription(user: User, sub: StripeSubscription, dep
     if (!estate.test_hold && (estate.status === "pending_manual" || estate.status === "provisioning" || estate.status === "error")) {
       await holdForTestMode(estate, now);
     }
-  } else if (granting) {
+  } else {
     let estate = await queueEstate(user, now);
     if (estate.test_hold) estate = await releaseTestHold(estate, now);
     if (estate.status === "suspended" || estate.suspend_pending) {
       if (deps.fly && estate.machine_id) await markResumePending(estate, now, "the subscription is active again");
       else if (estate.status === "suspended") await resumeEstate(estate, deps.fly, now); // nothing on Fly to start
     }
-  } else {
-    const estate = await getEstate(user.id);
-    // "suspended" is included: suspendEstate verifies the machine really is stopped instead of trusting the record
-    if (estate && (estate.status === "ready" || estate.status === "provisioning" || estate.status === "error" || estate.status === "suspended")) {
-      await suspendEstate(estate, deps.fly, now, `subscription ${sub.status}`);
-    }
   }
-  return tier;
+}
+
+/**
+ * invoice.paid (F2): the FIRST PAYMENT. With amount_paid > 0, for a subscription that resolves to a portal user, the
+ * customer is recorded as paid (create-only) and, if the account is already granted and active, its dedicated estate is
+ * queued now (otherwise the next subscription event does it). A zero amount, an invoice without a subscription, or a
+ * customer that resolves to no portal user is acknowledged and changes nothing.
+ */
+async function handleInvoicePaid(event: any, deps: WebhookDeps): Promise<WebhookOutcome> {
+  const inv = event?.data?.object ?? {};
+  const now = deps.now ? deps.now() : new Date();
+  const amount = Number(inv.amount_paid);
+  const subRef = inv.subscription ?? inv.parent?.subscription_details?.subscription ?? null;
+  const subId = typeof subRef === "string" ? subRef : subRef?.id ?? null;
+  const customer = typeof inv.customer === "string" ? inv.customer : inv.customer?.id ?? null;
+  if (!subId || !customer) return { handled: false, note: "invoice without a subscription or customer" };
+  if (!(Number.isFinite(amount) && amount > 0)) return { handled: false, note: "invoice with nothing paid: no estate" };
+  const sub = await getSubscription(deps.cfg, subId, deps.fetchImpl);
+  if (String(sub.customer) !== String(customer)) return { handled: false, note: "invoice and subscription name different customers" };
+  const user = await userForSubscription(sub, deps);
+  if (!user) return { handled: false, note: "no portal user for the paid invoice" };
+  await markPaidCustomer(String(customer), String(inv.id ?? ""), now);
+  return withUserLock(user.id, async () => {
+    const fresh = (await getUserById(user.id)) ?? user;
+    if (fresh.billing?.subscription_id !== sub.id || !GRANTING_STATUSES.has(fresh.billing.status) || fresh.tier === "sandbox") {
+      return { handled: true, note: "first payment recorded; the subscription event queues the estate" };
+    }
+    await ensureEstateOnGrant(fresh, { ...sub, status: fresh.billing.status }, deps, now);
+    if (fresh.billing.first_payment_pending) {
+      const { first_payment_pending: _drop, ...rest } = fresh.billing;
+      fresh.billing = rest;
+      await saveUser(fresh);
+    }
+    return { handled: true, note: "first payment recorded" };
+  });
 }
 
 /** True when the user's subscription currently grants a paid tier. */
@@ -613,6 +674,8 @@ export async function handleStripeEvent(event: any, baseDeps: WebhookDeps): Prom
   const deps: WebhookDeps = { ...baseDeps, provision: provisioningAllowed(event?.livemode) };
   const type = String(event?.type ?? "");
   const obj = event?.data?.object ?? {};
+
+  if (type === "invoice.paid") return handleInvoicePaid(event, deps);
 
   if (type === "checkout.session.completed") {
     if (obj.mode !== "subscription" || !obj.subscription) {

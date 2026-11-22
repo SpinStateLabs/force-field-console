@@ -1546,7 +1546,13 @@ export function resolveRoute(user: User, estate: Estate | null, now: Date = new 
       };
     }
     if (!estate || estate.status === "pending_manual") {
-      const reason = !estate ? "not_queued" : estate.test_hold ? "test_hold" : "pending_manual";
+      const reason = !estate
+        ? user.billing?.first_payment_pending
+          ? "awaiting_first_payment" // F2: active, nothing paid yet (zero-amount invoice, 100% coupon)
+          : "not_queued"
+        : estate.test_hold
+          ? "test_hold"
+          : "pending_manual";
       return {
         kind: "refuse",
         status: 503,

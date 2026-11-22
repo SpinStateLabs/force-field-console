@@ -69,6 +69,9 @@ describe("CX5 unknown-user-before-pointer", () => {
   });
 
   it("the same delivery order with a PAID (active) no-metadata subscription grants and queues the estate", async () => {
+    // F2 (#29): the customer's first invoice was paid (an amount > 0), so an active subscription may queue the estate.
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).setJSON("paid_customers/cus_1", { first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
     const sub1 = mkSub("sub_1", "incomplete", user.id);
     const sub3 = mkSub("sub_3", "active", null);
     const deps = { cfg: stripeConfig()!, fly: null, fetchImpl: stripeWith([sub1, sub3]) as any };

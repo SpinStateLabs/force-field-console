@@ -40,7 +40,8 @@ describe("stripe webhook state transitions", () => {
   let user: User;
 
   beforeEach(async () => {
-    freshStore();
+    // F2 (#29): an estate starts only after a paid invoice; these tests are about what happens once cus_1 has paid.
+    await freshStore().setJSON("paid_customers/cus_1", { first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
     Object.assign(process.env, STRIPE_ENV);
     user = await createUser("pay@example.com", "sufficiently-long-pass");
   });

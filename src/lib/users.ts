@@ -44,6 +44,8 @@ export type Billing = {
   seats_below_minimum?: true;
   /** More packs than seats allow (rev 4: one per seat): the excess does not count toward agent_pool; flagged and alerted. */
   packs_over_seats?: true;
+  /** F2: the subscription is active but no paid invoice (amount > 0) was seen yet: no dedicated estate until one is. */
+  first_payment_pending?: true;
 };
 
 export type User = {

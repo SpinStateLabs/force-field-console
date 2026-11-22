@@ -88,6 +88,8 @@ async function expectUntouched(before: Estate) {
 
 beforeEach(async () => {
   store = freshStore();
+  // F2 (#29): an estate starts only after a paid invoice; these tests are about what happens once cus_1 has paid.
+  await store.setJSON("paid_customers/cus_1", { first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV, SANDBOX_ENV);
   user = await createUser("release@example.com", "sufficiently-long-pass");
   await setBilling("canceled");
