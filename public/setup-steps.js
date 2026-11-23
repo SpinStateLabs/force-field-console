@@ -212,7 +212,7 @@ export const STEPS = [
       "A verdict: ALLOW, BLOCK or ESCALATE, with the reason code.",
     ],
     fail: [
-      "A BLOCK or ESCALATE names its reason: R.unregistered, D.scope, E.kill_switch, E.spend_cap, E.rate_limit, L.unreachable, and others.",
+      "A BLOCK or ESCALATE names its reason: R.unregistered, R.registry_unreachable, D.scope, E.kill_switch, E.spend_cap, E.rate_limit, L.unreachable, and others.",
       "A BLOCK is itself a ledger event.",
     ],
     status: "estate-ready",

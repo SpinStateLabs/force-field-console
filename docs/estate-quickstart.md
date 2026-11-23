@@ -65,7 +65,7 @@ curl -s -X POST "$FF/sentinel/check" -H "x-api-key: $FF_KEY" -H "content-type: a
   -d '{"agent_id":"invoice-bot","action":"draft invoice","token_id":"<token_id>"}'
 ```
 
-The verdict is `ALLOW`, `BLOCK` or `ESCALATE` with the reason code (`R.unregistered`, `D.scope`,
+The verdict is `ALLOW`, `BLOCK` or `ESCALATE` with the reason code (`R.unregistered`, `R.registry_unreachable`, `D.scope`,
 `E.kill_switch`, `E.spend_cap`, `E.rate_limit`, `L.unreachable`, ...). A `BLOCK` is itself a ledger
 event.
 

@@ -61,6 +61,13 @@ describe("step registry vs the quickstart guide", () => {
   });
 });
 
+describe("sentinel reason codes", () => {
+  it("names R.registry_unreachable beside R.unregistered (field-platform B16)", () => {
+    expect(JSON.stringify(STEPS)).toContain("names its reason: R.unregistered, R.registry_unreachable, D.scope");
+    expect(guide).toContain("`R.unregistered`, `R.registry_unreachable`, `D.scope`");
+  });
+});
+
 describe("routing and links", () => {
   it("slugs and numbers are unique and url-safe", () => {
     expect(new Set(SLUGS).size).toBe(SLUGS.length);
