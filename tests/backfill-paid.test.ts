@@ -226,7 +226,7 @@ describe("planBackfill (read-only)", () => {
       await saveUser(u);
       const e = await queueEstate(u);
       Object.assign(e, over);
-      await saveEstate(e);
+      await saveEstate(e, undefined, { owns: over.test_hold ? ["test_hold"] : [] });
       return u;
     };
     const resumes = await mk("r1@example.com", "sub_r1", { status: "suspended" });
