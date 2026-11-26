@@ -126,21 +126,22 @@ describe("registering an agent", () => {
     expect((await r.json()).error.code).toBe("agent_count_unavailable");
   });
 
-  it("path variants the upstream routes the same way are gated too", async () => {
+  it("path variants are refused before the pool gate (raw-path refusal or route allowlist); nothing is forwarded", async () => {
     await readyEstate(1);
     agents = own(1);
     for (const p of ["/registry/agents/", "/registry//agents", "//registry/agents", "/registry/agents//", "/registry%2Fagents", "/registry/%61gents"]) {
       const r = await send(p, "POST", { agent_id: "v", name: "v", owner: "me@example.com", domain: "d" });
-      expect(r.status, p).toBe(403);
+      expect([400, 404], p).toContain(r.status);
     }
-    expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+    expect(calls).toEqual([]);
   });
 
-  it("an undecodable path under /registry is refused (400), not forwarded", async () => {
+  it("an undecodable path under /registry is refused (404 at the route allowlist), not forwarded", async () => {
     await readyEstate(5);
     const r = await send("/registry/agents%E0%A4%A", "POST", {});
-    expect(r.status).toBe(400);
-    expect((await r.json()).error.code).toBe("bad_path");
+    expect(r.status).toBe(404);
+    expect((await r.json()).error.code).toBe("not_found");
+    expect(calls).toEqual([]);
   });
 
   it("concurrent registrations never exceed the pool", async () => {
@@ -152,32 +153,17 @@ describe("registering an agent", () => {
   });
 });
 
-describe("reviving a retired agent", () => {
-  it("at the pool: PATCH to a non-retired status is refused", async () => {
+describe("reviving or changing an agent (PATCH)", () => {
+  it("PATCH /registry/agents/<id> is not forwarded through the console (404): no revival past the pool is possible", async () => {
     await readyEstate(2);
     agents = [...own(2), { agent_id: "old", owner: "me@example.com", status: "retired" }];
-    const r = await send("/registry/agents/old", "PATCH", { status: "active" });
-    expect(r.status).toBe(403);
+    for (const body of [{ status: "active" }, { status: "retired" }, { domain: "ops" }]) {
+      const r = await send("/registry/agents/old", "PATCH", body);
+      expect(r.status, JSON.stringify(body)).toBe(404);
+      expect((await r.json()).error.code).toBe("not_found");
+    }
     expect(agents.find((a) => a.agent_id === "old")!.status).toBe("retired");
-  });
-
-  it("below the pool: allowed", async () => {
-    await readyEstate(3);
-    agents = [...own(2), { agent_id: "old", owner: "me@example.com", status: "retired" }];
-    expect((await send("/registry/agents/old", "PATCH", { status: "active" })).status).toBe(200);
-  });
-
-  it("retiring, or a PATCH that changes no status, is never gated", async () => {
-    await readyEstate(1);
-    agents = own(3); // already over (e.g. seats lowered): the customer must still be able to retire
-    expect((await send("/registry/agents/a0", "PATCH", { status: "retired" })).status).toBe(200);
-    expect((await send("/registry/agents/a1", "PATCH", { domain: "ops" })).status).toBe(200);
-  });
-
-  it("a PATCH on an agent that is already active is not a revival (not gated)", async () => {
-    await readyEstate(1);
-    agents = own(2);
-    expect((await send("/registry/agents/a0", "PATCH", { status: "active" })).status).toBe(200);
+    expect(calls).toEqual([]);
   });
 });
 
@@ -189,34 +175,13 @@ describe("not gated", () => {
     expect((await send("/sentinel/check", "POST", {})).status).toBe(200);
   });
 
-  it("a sandbox account (no dedicated estate) registers on the shared sandbox without a count", async () => {
+  it("a sandbox account (no dedicated estate) cannot register on the shared sandbox (403 not_on_sandbox); nothing is sent", async () => {
     process.env.ESTATE_URL = "https://sandbox.example";
     process.env.ESTATE_SHARED_SECRET = "s";
-    expect((await reg("sb")).status).toBe(201);
-    expect(calls.map((c) => c.method)).toEqual(["POST"]);
-  });
-});
-
-describe("revival fails closed", () => {
-  it("the agent's status cannot be read (non-404): 503, the PATCH is not forwarded", async () => {
-    await readyEstate(5);
-    agents = [{ agent_id: "old", owner: "me@example.com", status: "retired" }];
-    vi.stubGlobal("fetch", async (input: any, init?: any) => {
-      const method = String(init?.method ?? "GET").toUpperCase();
-      calls.push({ method, url: new URL(typeof input === "string" ? input : input.url).pathname });
-      return new Response("{}", { status: method === "GET" ? 500 : 200, headers: { "content-type": "application/json" } });
-    });
-    const r = await send("/registry/agents/old", "PATCH", { status: "active" });
-    expect(r.status).toBe(503);
-    expect(calls.filter((c) => c.method === "PATCH")).toEqual([]);
-  });
-
-  it("an unknown agent (404) is forwarded and the upstream answers", async () => {
-    await readyEstate(0);
-    agents = [];
-    const r = await send("/registry/agents/ghost", "PATCH", { status: "active" });
-    expect(calls.some((c) => c.method === "PATCH")).toBe(true);
-    expect(r.status).not.toBe(403);
+    const r = await reg("sb");
+    expect(r.status).toBe(403);
+    expect((await r.json()).error.code).toBe("not_on_sandbox");
+    expect(calls).toEqual([]);
   });
 });
 

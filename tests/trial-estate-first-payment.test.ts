@@ -265,10 +265,14 @@ describe("gateway: a paid account with no estate is never routed to the shared s
     await expectRefusedNoLeak(503, "estate_not_ready", "awaiting_first_payment");
   });
 
-  it("a sandbox account is still routed to the shared sandbox (unchanged)", async () => {
-    const r = await call();
+  it("a sandbox account is still routed to the shared sandbox (unchanged), for a route the sandbox serves", async () => {
+    const key = (await issueKey((await getUserById(user.id))!, "k")).plaintext;
+    const r = await gateway(new Request("http://portal.test/api/v1/ledger/health", { headers: { "x-api-key": key } }), ctx);
     expect(r.status).toBe(200);
-    expect(fetches).toEqual(["https://sandbox.example/registry/agents"]);
+    expect(fetches).toEqual(["https://sandbox.example/ledger/health"]);
+    const listed = await call(); // GET /registry/agents is dedicated-only since PR 31
+    expect(listed.status).toBe(403);
+    expect(fetches).toEqual(["https://sandbox.example/ledger/health"]);
   });
 });
 
