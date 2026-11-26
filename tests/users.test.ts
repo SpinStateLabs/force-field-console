@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { createHash } from "node:crypto";
 import { freshStore } from "./helpers";
 import {
   createUser,
@@ -8,9 +9,14 @@ import {
   isAcceptableEmail,
   WeakPassword,
   EmailTaken,
+  canonicalEmail,
+  emailKey,
 } from "../src/lib/users";
 
 const GOOD_PASSWORD = "sufficiently-long-pass";
+const NFC = "jos\u00e9@example.fr"; // precomposed e-acute
+const NFD = "jose\u0301@example.fr"; // e + combining acute
+const oldKey = (typed: string) => "users/" + createHash("sha256").update(typed.trim().toLowerCase()).digest("hex");
 
 describe("users", () => {
   beforeEach(() => {
@@ -131,5 +137,58 @@ describe("users", () => {
     expect(found!.tier).toBe("sandbox");
     const missing = await getUserById("00000000-0000-0000-0000-000000000000");
     expect(missing).toBeNull();
+  });
+
+  describe("normalisation and trailing dot (sweep finding 3 follow-ups)", () => {
+    it("stores the NFC form, and the two spellings of one address share one account", async () => {
+      expect(NFC).not.toBe(NFD);
+      expect(canonicalEmail(NFD)).toBe(NFC);
+      expect(emailKey(NFD)).toBe(emailKey(NFC));
+      const u = await createUser(NFD, GOOD_PASSWORD);
+      expect(u.email).toBe(NFC);
+      await expect(createUser(NFC, GOOD_PASSWORD)).rejects.toBeInstanceOf(EmailTaken);
+      expect((await verifyUser(NFC, GOOD_PASSWORD))?.id).toBe(u.id);
+      expect((await verifyUser(NFD, GOOD_PASSWORD))?.id).toBe(u.id);
+    });
+
+    it("keeps every ASCII account on its old key", () => {
+      for (const e of ["alice@example.com", "  Mixed.Case+tag@Sub.Example.co.uk "]) {
+        expect(emailKey(e)).toBe(oldKey(e));
+      }
+    });
+
+    it("still finds an account stored under the old (un-normalised NFD) key, for login and for the duplicate check", async () => {
+      const store = freshStore();
+      const legacy = { id: "11111111-1111-1111-1111-111111111111", email: NFD, pw_hash: "", tier: "sandbox", created_at: "2026-01-01T00:00:00Z", keys: [] };
+      const bcrypt = (await import("bcryptjs")).default;
+      legacy.pw_hash = bcrypt.hashSync(GOOD_PASSWORD, 4);
+      expect(oldKey(NFD)).not.toBe(emailKey(NFD));
+      await store.setJSON(oldKey(NFD), legacy);
+      await store.setJSON("uid/" + legacy.id, { email_key: oldKey(NFD) });
+      expect((await verifyUser(NFD, GOOD_PASSWORD))?.id).toBe(legacy.id);
+      expect((await verifyUser(NFC, GOOD_PASSWORD))?.id).toBe(legacy.id);
+      expect(await verifyUser(NFC, "wrong-password-here")).toBeNull();
+      await expect(createUser(NFC, GOOD_PASSWORD)).rejects.toBeInstanceOf(EmailTaken);
+      await expect(createUser(NFD, GOOD_PASSWORD)).rejects.toBeInstanceOf(EmailTaken);
+      expect((await getUserById(legacy.id))?.email).toBe(NFD);
+    });
+
+    it("refuses a domain that ends in a dot, so one address cannot hold two accounts", async () => {
+      for (const bad of ["trail@example.com.", "trail@example.com..", "Trail@Example.COM."]) {
+        expect(isAcceptableEmail(bad), bad).toBe(false);
+        await expect(createUser(bad, GOOD_PASSWORD)).rejects.toBeInstanceOf(BadEmail);
+      }
+      expect(isAcceptableEmail("trail@example.com")).toBe(true);
+    });
+
+    it("applies the 254 bound to the NFC form too (NFC can lengthen a string)", () => {
+      // U+0958 is a composition exclusion: NFC turns it into two code units.
+      expect("\u0958".normalize("NFC").length).toBe(2);
+      const tail = "@" + "b".repeat(254 - 10 - 1 - ".example".length) + ".example";
+      const asGiven = "\u0958".repeat(10) + tail;
+      expect(asGiven.length).toBe(254);
+      expect(canonicalEmail(asGiven).length).toBe(264);
+      expect(isAcceptableEmail(asGiven)).toBe(false);
+    });
   });
 });
