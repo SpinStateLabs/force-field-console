@@ -8,6 +8,7 @@ import { env } from "../../src/lib/store";
 import { lookupKey } from "../../src/lib/keys";
 import { checkRateLimit } from "../../src/lib/ratelimit";
 import { getEstate, resolveRoute } from "../../src/lib/estates";
+import { GATEWAY_PREFIX, rawPathRefusal, upstreamTarget } from "../../src/lib/upstream";
 
 function err(status: number, code: string, message: string, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
@@ -17,7 +18,16 @@ function err(status: number, code: string, message: string, headers?: Record<str
 }
 
 export default async (req: Request, _context: Context): Promise<Response> => {
+  // --- Refuse an unsafe raw path before anything else (src/lib/upstream.ts). Decided on the raw req.url string,
+  // never on the parsed pathname, because parsing resolves encoded dot segments and turns "\" into "/". ---
+  const refusal = rawPathRefusal(req.url);
+  if (refusal) {
+    return err(400, "bad_path", "The request path is not accepted (" + refusal + ").");
+  }
   const url = new URL(req.url);
+  if (!url.pathname.startsWith(GATEWAY_PREFIX + "/")) {
+    return err(400, "bad_path", "The request path is not accepted (outside " + GATEWAY_PREFIX + "/).");
+  }
 
   // --- Authenticate: x-api-key only. Sessions do not grant engine access. ---
   const apiKey = req.headers.get("x-api-key");
@@ -70,9 +80,14 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     }
   }
 
-  // --- Proxy. Strip the /api/v1 prefix; keep the query string. ---
-  const base = estateUrl.replace(/\/+$/, "");
-  const target = base + url.pathname.slice("/api/v1".length) + url.search;
+  // --- Proxy. Strip the /api/v1 prefix; keep the query string. The target is built with the URL constructor against
+  // the estate base and must keep the base's origin and stay under its path; otherwise nothing is sent. The
+  // perimeter secret and the tenant header are attached only below, after this check has passed. ---
+  const targetUrl = upstreamTarget(url.pathname, url.search, estateUrl);
+  if (!targetUrl) {
+    return err(400, "bad_path", "The request path is not accepted (it does not resolve inside the estate).");
+  }
+  const target = targetUrl.toString();
 
   const headers = new Headers();
   const contentType = req.headers.get("content-type");
