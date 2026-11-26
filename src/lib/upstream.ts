@@ -4,7 +4,7 @@
 //  1. `rawPathRefusal` checks the RAW request target (the string in req.url, before any parsing) and refuses dot
 //     segments in any encoding, backslashes, encoded slashes or backslashes, '@', control characters and NUL.
 //  2. `estateBase` accepts an estate base only when it is an https URL without userinfo; http is accepted only for a
-//     loopback host (localhost, *.localhost, 127.0.0.0/8, [::1]).
+//     loopback host (exactly localhost, 127.0.0.0/8, [::1]).
 //  3. `upstreamTarget` requires the parsed pathname to start with the gateway prefix, builds the target with the URL
 //     constructor against the estate base, and returns null unless the target has the base's origin, carries no
 //     userinfo, and its path is the base path followed by "/" (so a sibling such as /engine-x never matches /engine).
@@ -45,7 +45,11 @@ export type RouteKind = "estate" | "sandbox";
 export type AllowedRoute = {
   method: "GET" | "POST";
   pattern: RegExp;
-  /** Allowed on the shared sandbox too. False for a route that reads or writes across tenants on a shared estate. */
+  /**
+   * Allowed on the shared sandbox too. False for a route that reads or writes across tenants on a shared estate, or
+   * that spends on the estate's model key (the shared sandbox has no tenant separation of its own: the estate does not
+   * read x-ff-tenant).
+   */
   sandbox: boolean;
   docs: string;
 };
@@ -67,7 +71,7 @@ export const ALLOWED_ROUTES: readonly AllowedRoute[] = [
   { method: "POST", pattern: /^\/delegation\/tokens$/, sandbox: false, docs: "docs/estate-quickstart.md:51; public/setup-steps.js:176" },
   { method: "POST", pattern: new RegExp("^/delegation/tokens/" + TOKEN_ID + "/revoke$"), sandbox: false, docs: "docs/estate-quickstart.md:59; public/setup-steps.js:171,181,184" },
   { method: "POST", pattern: /^\/sentinel\/check$/, sandbox: true, docs: "docs/estate-quickstart.md:64; public/setup-steps.js:207; public/app.js:743; public/index.html:80" },
-  { method: "POST", pattern: /^\/gateway\/v1\/messages$/, sandbox: true, docs: "docs/estate-quickstart.md:78; public/setup-steps.js:236" },
+  { method: "POST", pattern: /^\/gateway\/v1\/messages$/, sandbox: false, docs: "docs/estate-quickstart.md:78; public/setup-steps.js:236" },
   { method: "GET", pattern: /^\/gateway\/presets$/, sandbox: true, docs: "docs/estate-quickstart.md:84 (x-force-preset selects a FORCE preset)" },
   { method: "GET", pattern: new RegExp("^/gateway/presets/" + PRESET_NAME + "$"), sandbox: true, docs: "docs/estate-quickstart.md:84" },
   { method: "GET", pattern: /^\/attest\/pack$/, sandbox: false, docs: "docs/estate-quickstart.md:90; public/setup-steps.js:264-265" },
@@ -122,7 +126,7 @@ export function rawPathRefusal(rawUrl: string): RefusalCode | null {
 /** True for a loopback host name as the URL parser reports it (`hostname`; IPv6 keeps its brackets). */
 export function isLoopbackHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
-  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "localhost") return true;
   if (h === "[::1]") return true;
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }

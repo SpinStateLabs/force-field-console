@@ -7,7 +7,7 @@ import type { Context, Config } from "@netlify/functions";
 import { env } from "../../src/lib/store";
 import { lookupKey } from "../../src/lib/keys";
 import { checkRateLimit } from "../../src/lib/ratelimit";
-import { getEstate, resolveRoute } from "../../src/lib/estates";
+import { getEstate, newAppName, resolveRoute } from "../../src/lib/estates";
 import { estateOrigin } from "../../src/lib/fly";
 import {
   FORWARDED_CALLER_HEADERS,
@@ -82,9 +82,10 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   let estateUrl: string | undefined;
   let sharedSecret: string | undefined;
   if (route.kind === "estate") {
-    // A dedicated estate is reached only at the origin derived from its own app name; a stored url that differs
-    // (a corrupted or tampered record) sends nothing.
-    if (!estate || route.url !== estateOrigin(estate.app)) {
+    // A dedicated estate is reached only when its app name is the one derived from this user's id (the function
+    // provisioning uses) and its stored url is the origin derived from that app name; a record with either altered
+    // (corrupted or tampered) sends nothing.
+    if (!estate || estate.app !== newAppName(user.id) || route.url !== estateOrigin(estate.app)) {
       return refuse("estate_url_mismatch", 502, "estate_misconfigured", "Your dedicated estate's address could not be verified; nothing was sent. Contact Spin State Labs.");
     }
     estateUrl = route.url;

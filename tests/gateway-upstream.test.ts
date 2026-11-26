@@ -229,7 +229,7 @@ describe("gateway handler: only the allowlisted caller headers are forwarded", (
       "x-ff-tenant": "spoofed-tenant",
     };
     for (const n of DROPPED) h[n] = n === "x-force-passthrough" ? "judge" : "v";
-    const res = await handler(new Request("https://force-field-console.netlify.app/api/v1/gateway/v1/messages", { method: "POST", headers: h, body: "{}" }), ctx);
+    const res = await handler(new Request("https://force-field-console.netlify.app/api/v1/sentinel/check", { method: "POST", headers: h, body: "{}" }), ctx);
     expect(res.status).toBe(200);
     const sent = new Headers((fetchMock.mock.calls[0] as [string, RequestInit])[1].headers);
     expect(sent.get("x-field-agent-id")).toBe("invoice-bot");

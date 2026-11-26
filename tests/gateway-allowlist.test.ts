@@ -24,7 +24,7 @@ const DOCUMENTED: [string, string, boolean][] = [
   ["POST", "/delegation/tokens", false],
   ["POST", `/delegation/tokens/${TOKEN}/revoke`, false],
   ["POST", "/sentinel/check", true],
-  ["POST", "/gateway/v1/messages", true],
+  ["POST", "/gateway/v1/messages", false], // spends on the estate's model key: dedicated only
   ["GET", "/gateway/presets", true],
   ["GET", "/gateway/presets/audit", true],
   ["GET", "/attest/pack?period=2026-Q3", false],

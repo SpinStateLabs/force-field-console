@@ -19,7 +19,7 @@ function rawReq(rawUrl: string, headers: Record<string, string>, method = "GET")
 }
 
 describe("estate base: https, or http on a loopback host only", () => {
-  it.each(["http://sandbox.example", "http://estate.test", "http://10.0.0.5:8080", "http://169.254.169.254", "ftp://sandbox.example", "https://user:pw@sandbox.example", "https://user@sandbox.example", "not a url"])(
+  it.each(["http://estate.localhost", "http://a.b.localhost:8080", "http://sandbox.example", "http://estate.test", "http://10.0.0.5:8080", "http://169.254.169.254", "ftp://sandbox.example", "https://user:pw@sandbox.example", "https://user@sandbox.example", "not a url"])(
     "refuses %s",
     (b) => {
       expect(estateBase(b)).toBeNull();
@@ -27,7 +27,7 @@ describe("estate base: https, or http on a loopback host only", () => {
     },
   );
 
-  it.each(["https://sandbox.example", "https://sandbox.example/engine", "http://localhost:8080", "http://estate.localhost", "http://127.0.0.1:9000", "http://127.10.20.30", "http://[::1]:8443"])(
+  it.each(["https://sandbox.example", "https://sandbox.example/engine", "http://localhost:8080", "http://LOCALHOST", "http://127.0.0.1:9000", "http://127.10.20.30", "http://[::1]:8443"])(
     "accepts %s",
     (b) => {
       expect(estateBase(b)).not.toBeNull();
@@ -38,6 +38,9 @@ describe("estate base: https, or http on a loopback host only", () => {
   it("knows its loopback hosts", () => {
     expect(isLoopbackHost("LOCALHOST")).toBe(true);
     expect(isLoopbackHost("localhost.example")).toBe(false);
+    expect(isLoopbackHost("estate.localhost")).toBe(false);
+    expect(isLoopbackHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackHost("[::1]")).toBe(true);
     expect(isLoopbackHost("127.0.0.1.example")).toBe(false);
     expect(isLoopbackHost("[::2]")).toBe(false);
   });
