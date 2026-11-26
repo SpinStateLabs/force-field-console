@@ -182,3 +182,63 @@ describe("gateway handler: a refused request never reaches fetch", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe("gateway handler: only the allowlisted caller headers are forwarded", () => {
+  let key: string;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    freshStore();
+    process.env.ESTATE_URL = "https://sandbox.example";
+    process.env.ESTATE_SHARED_SECRET = "sandbox-secret";
+    const user = await createUser("headers@example.com", "sufficiently-long-pass");
+    key = (await issueKey(user, "t")).plaintext;
+    fetchMock = vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.ESTATE_URL;
+    delete process.env.ESTATE_SHARED_SECRET;
+  });
+
+  const DROPPED = [
+    "x-field-operator",
+    "x-field-operator-key",
+    "x-field-operator-on-behalf-of",
+    "x-field-internal",
+    "x-field-kill-origin",
+    "x-field-kill-reason",
+    "x-force-passthrough",
+    "x-field-auth-extra",
+    "x-field-anything-new",
+    "x-force-anything-new",
+  ];
+
+  it("forwards the agent id, token, action and preset, and drops every other x-field-* / x-force-* header", async () => {
+    const h: Record<string, string> = {
+      "x-api-key": key,
+      "content-type": "application/json",
+      "x-field-agent-id": "invoice-bot",
+      "x-field-token": "tok-123",
+      "x-field-action": "draft invoice",
+      "x-force-preset": "audit",
+      "x-field-auth": "spoofed-secret",
+      "x-ff-tenant": "spoofed-tenant",
+    };
+    for (const n of DROPPED) h[n] = n === "x-force-passthrough" ? "judge" : "v";
+    const res = await handler(new Request("https://force-field-console.netlify.app/api/v1/gateway/v1/messages", { method: "POST", headers: h, body: "{}" }), ctx);
+    expect(res.status).toBe(200);
+    const sent = new Headers((fetchMock.mock.calls[0] as [string, RequestInit])[1].headers);
+    expect(sent.get("x-field-agent-id")).toBe("invoice-bot");
+    expect(sent.get("x-field-token")).toBe("tok-123");
+    expect(sent.get("x-field-action")).toBe("draft invoice");
+    expect(sent.get("x-force-preset")).toBe("audit");
+    expect(sent.get("x-field-auth")).toBe("sandbox-secret");
+    expect(sent.get("x-ff-tenant")).not.toBe("spoofed-tenant");
+    for (const n of DROPPED) expect(sent.get(n), n).toBeNull();
+    const names = [...sent.keys()].filter((n) => n.startsWith("x-field-") || n.startsWith("x-force-")).sort();
+    expect(names).toEqual(["x-field-action", "x-field-agent-id", "x-field-auth", "x-field-token", "x-force-preset"]);
+  });
+});

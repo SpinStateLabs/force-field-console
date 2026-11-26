@@ -65,3 +65,14 @@ export function upstreamTarget(pathname: string, search: string, base: string): 
   return target;
 }
 
+/**
+ * Caller headers the gateway forwards to the estate, and nothing else of the x-field-* / x-force-* families.
+ * Each is read by the estate's force-gateway (field-platform 6c1f9aa6, services/force-gateway/src/force_gateway/api.py):
+ *  - x-force-preset:   :1116 (Header, default "analysis"): the FORCE prompt-hygiene preset;
+ *  - x-field-agent-id: :1117, checked :1127, required under enforce :1136;
+ *  - x-field-token:    :1121, checked :1127, required under enforce :1136;
+ *  - x-field-action:   :1122, checked :1130-1131, used :1143.
+ * Never forwarded from a caller: x-field-auth and x-ff-tenant (the console sets its own), and every operator,
+ * on-behalf-of, internal, kill-origin, kill-reason and passthrough header.
+ */
+export const FORWARDED_CALLER_HEADERS: readonly string[] = ["x-field-agent-id", "x-field-token", "x-field-action", "x-force-preset"];

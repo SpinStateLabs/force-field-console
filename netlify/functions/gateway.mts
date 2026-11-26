@@ -8,7 +8,7 @@ import { env } from "../../src/lib/store";
 import { lookupKey } from "../../src/lib/keys";
 import { checkRateLimit } from "../../src/lib/ratelimit";
 import { getEstate, resolveRoute } from "../../src/lib/estates";
-import { GATEWAY_PREFIX, rawPathRefusal, upstreamTarget } from "../../src/lib/upstream";
+import { FORWARDED_CALLER_HEADERS, GATEWAY_PREFIX, rawPathRefusal, upstreamTarget } from "../../src/lib/upstream";
 
 function err(status: number, code: string, message: string, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
@@ -94,13 +94,15 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   if (contentType) headers.set("content-type", contentType);
   const accept = req.headers.get("accept");
   if (accept) headers.set("accept", accept);
-  // The caller's agent identity and preset headers (x-field-agent-id, x-field-token,
-  // x-field-action, x-force-preset, ...) pass through: an enforcing estate gateway
-  // refuses /v1/messages without them. The perimeter secret (x-field-auth) and the
-  // tenant header are always the portal's own values, never the caller's.
-  for (const [name, value] of req.headers) {
-    const n = name.toLowerCase();
-    if ((n.startsWith("x-field-") || n.startsWith("x-force-")) && n !== "x-field-auth") headers.set(n, value);
+  // Only the caller headers the estate gateway needs pass through (FORWARDED_CALLER_HEADERS, src/lib/upstream.ts:
+  // agent id, token, action, preset; an enforcing estate gateway refuses /v1/messages without the first two). Every
+  // other x-field-* / x-force-* header from the caller (operator, on-behalf-of, internal, kill-origin, passthrough, ...)
+  // is dropped: the request below carries the console's own perimeter secret, and an estate rule of the form "honoured
+  // when the secret is presented" must not be satisfied on a caller's behalf. The perimeter secret (x-field-auth) and
+  // the tenant header are always the portal's own values, never the caller's.
+  for (const n of FORWARDED_CALLER_HEADERS) {
+    const value = req.headers.get(n);
+    if (value !== null) headers.set(n, value);
   }
   if (sharedSecret) headers.set("x-field-auth", sharedSecret);
   headers.set("x-ff-tenant", user.id);
