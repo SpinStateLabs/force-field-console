@@ -167,21 +167,14 @@ export const STEPS = [
     purpose:
       "Give the agent a scoped, time-limited delegation. granted_by must equal your grantor string exactly (your account email), the scopes must be a subset of the scopes you saved on the dashboard, and the TTL must not exceed the longest token you allowed there.",
     details: [
-      "The answer carries token_id; keep it with the agent. Every mint and revoke is a signed ledger event.",
-      "To revoke, POST $FF/delegation/tokens/<token_id>/revoke.",
+      "The answer carries token_id; keep it with the agent. Every mint is a signed ledger event.",
+      "A token ends at its TTL. To end one earlier, ask Spin State Labs: revocation is an operator action on the estate.",
     ],
     commands: [
       {
         label: "Mint a 24-hour token",
         sh: `curl -s -X POST "$FF/delegation/tokens" -H "x-api-key: $FF_KEY" -H "content-type: application/json" \\\n  -d '{"agent_id":"invoice-bot","granted_by":"'"$ME"'","scope":["draft invoice"],"ttl_seconds":86400}'`,
         ps: psPost("/delegation/tokens", `'{"agent_id":"invoice-bot","granted_by":"' + $env:ME + '","scope":["draft invoice"],"ttl_seconds":86400}'`),
-      },
-      {
-        label: "Revoke (replace <token_id>)",
-        sh: 'curl -s -X POST "$FF/delegation/tokens/<token_id>/revoke" -H "x-api-key: $FF_KEY"',
-        derivedSh: true,
-        sNote: "The guide gives only the route, POST $FF/delegation/tokens/<token_id>/revoke; this curl form is expanded from it.",
-        ps: 'curl.exe -s -X POST "$env:FF/delegation/tokens/<token_id>/revoke" ' + PS_KEY + PS_W,
       },
     ],
     see: ["A JSON answer carrying token_id. Keep it with the agent; step 3 and step 4 use it."],

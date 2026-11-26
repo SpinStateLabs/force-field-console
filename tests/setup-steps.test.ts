@@ -40,6 +40,18 @@ describe("step registry vs the quickstart guide", () => {
     }
   });
 
+  it("offers no customer token-revoke call (revocation is an operator action: decision line 34 A)", () => {
+    const guide = readFileSync(join(root, "docs/estate-quickstart.md"), "utf-8");
+    expect(guide).not.toMatch(/\/revoke/);
+    for (const step of STEPS) {
+      for (const c of step.commands ?? []) {
+        expect(c.sh ?? "", step.id).not.toMatch(/\/revoke/);
+        expect(c.ps ?? "", step.id).not.toMatch(/\/revoke/);
+      }
+      expect(JSON.stringify(step.details ?? []), step.id).not.toMatch(/\/revoke/);
+    }
+  });
+
   it("carries every fenced command from the guide verbatim", () => {
     const all = STEPS.flatMap((s: any) => s.commands.map((c: any) => c.sh));
     for (const block of fencedBlocks(guide)) {

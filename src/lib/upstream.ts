@@ -54,8 +54,6 @@ export type AllowedRoute = {
   docs: string;
 };
 
-/** A delegation token id as the platform mints it: str(uuid.uuid4()) (field-platform field_core/delegation.py:33). */
-const TOKEN_ID = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 /** A FORCE preset name (force_gateway/presets.py:23: analysis, brainstorm, draft, audit). */
 const PRESET_NAME = "[a-z][a-z0-9_-]{0,31}";
 
@@ -67,17 +65,16 @@ const PRESET_NAME = "[a-z][a-z0-9_-]{0,31}";
  */
 export const ALLOWED_ROUTES: readonly AllowedRoute[] = [
   { method: "POST", pattern: /^\/registry\/agents$/, sandbox: false, docs: "docs/estate-quickstart.md:37; public/setup-steps.js:148" },
-  { method: "GET", pattern: /^\/registry\/agents$/, sandbox: false, docs: "docs/estate-quickstart.md:108; public/setup-steps.js:300" },
+  { method: "GET", pattern: /^\/registry\/agents$/, sandbox: false, docs: "docs/estate-quickstart.md:106; public/setup-steps.js:293" },
   { method: "POST", pattern: /^\/delegation\/tokens$/, sandbox: false, docs: "docs/estate-quickstart.md:51; public/setup-steps.js:176" },
-  { method: "POST", pattern: new RegExp("^/delegation/tokens/" + TOKEN_ID + "/revoke$"), sandbox: false, docs: "docs/estate-quickstart.md:59; public/setup-steps.js:171,181,184" },
-  { method: "POST", pattern: /^\/sentinel\/check$/, sandbox: true, docs: "docs/estate-quickstart.md:64; public/setup-steps.js:207; public/app.js:743; public/index.html:80" },
-  { method: "POST", pattern: /^\/gateway\/v1\/messages$/, sandbox: false, docs: "docs/estate-quickstart.md:78; public/setup-steps.js:236" },
-  { method: "GET", pattern: /^\/gateway\/presets$/, sandbox: true, docs: "docs/estate-quickstart.md:84 (x-force-preset selects a FORCE preset)" },
-  { method: "GET", pattern: new RegExp("^/gateway/presets/" + PRESET_NAME + "$"), sandbox: true, docs: "docs/estate-quickstart.md:84" },
-  { method: "GET", pattern: /^\/attest\/pack$/, sandbox: false, docs: "docs/estate-quickstart.md:90; public/setup-steps.js:264-265" },
-  { method: "GET", pattern: /^\/attest\/pack\.html$/, sandbox: false, docs: "docs/estate-quickstart.md:91; public/setup-steps.js:264-265" },
-  { method: "GET", pattern: /^\/ledger\/health$/, sandbox: true, docs: "docs/estate-quickstart.md:107; public/setup-steps.js:300" },
-  { method: "GET", pattern: /^\/lifecycle\/findings$/, sandbox: false, docs: "docs/estate-quickstart.md:109; public/setup-steps.js:300" },
+  { method: "POST", pattern: /^\/sentinel\/check$/, sandbox: true, docs: "docs/estate-quickstart.md:62; public/setup-steps.js:200; public/app.js:743; public/index.html:80" },
+  { method: "POST", pattern: /^\/gateway\/v1\/messages$/, sandbox: false, docs: "docs/estate-quickstart.md:76; public/setup-steps.js:229" },
+  { method: "GET", pattern: /^\/gateway\/presets$/, sandbox: true, docs: "docs/estate-quickstart.md:82 (x-force-preset selects a FORCE preset)" },
+  { method: "GET", pattern: new RegExp("^/gateway/presets/" + PRESET_NAME + "$"), sandbox: true, docs: "docs/estate-quickstart.md:82" },
+  { method: "GET", pattern: /^\/attest\/pack$/, sandbox: false, docs: "docs/estate-quickstart.md:88; public/setup-steps.js:257" },
+  { method: "GET", pattern: /^\/attest\/pack\.html$/, sandbox: false, docs: "docs/estate-quickstart.md:89; public/setup-steps.js:257" },
+  { method: "GET", pattern: /^\/ledger\/health$/, sandbox: true, docs: "docs/estate-quickstart.md:105; public/setup-steps.js:293" },
+  { method: "GET", pattern: /^\/lifecycle\/findings$/, sandbox: false, docs: "docs/estate-quickstart.md:107; public/setup-steps.js:293" },
 ];
 
 export type RouteDecision = { ok: true } | { ok: false; reason: RefusalCode; status: number; code: string; message: string };
