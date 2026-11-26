@@ -54,9 +54,7 @@ curl -s -X POST "$FF/delegation/tokens" -H "x-api-key: $FF_KEY" -H "content-type
 
 The answer carries `token_id`; keep it with the agent. Refusals are explicit: `403 D.grantor` (not on
 the roster, inactive, or a scope you may not delegate), `422 D.scope` (outside the agent's manifest),
-`403` on a TTL past your ceiling. Every mint and revoke is a signed ledger event.
-
-Revoke: `POST $FF/delegation/tokens/<token_id>/revoke`.
+`403` on a TTL past your ceiling. Every mint is a signed ledger event. A token ends at its TTL. To end one earlier, ask Spin State Labs: revocation is an operator action on the estate.
 
 ## 3. Check an action before taking it
 
@@ -65,7 +63,7 @@ curl -s -X POST "$FF/sentinel/check" -H "x-api-key: $FF_KEY" -H "content-type: a
   -d '{"agent_id":"invoice-bot","action":"draft invoice","token_id":"<token_id>"}'
 ```
 
-The verdict is `ALLOW`, `BLOCK` or `ESCALATE` with the reason code (`R.unregistered`, `D.scope`,
+The verdict is `ALLOW`, `BLOCK` or `ESCALATE` with the reason code (`R.unregistered`, `R.registry_unreachable`, `D.scope`,
 `E.kill_switch`, `E.spend_cap`, `E.rate_limit`, `L.unreachable`, ...). A `BLOCK` is itself a ledger
 event.
 

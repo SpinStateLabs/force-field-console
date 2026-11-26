@@ -22,7 +22,6 @@ const DOCUMENTED: [string, string, boolean][] = [
   ["POST", "/registry/agents", false],
   ["GET", "/registry/agents", false],
   ["POST", "/delegation/tokens", false],
-  ["POST", `/delegation/tokens/${TOKEN}/revoke`, false],
   ["POST", "/sentinel/check", true],
   ["POST", "/gateway/v1/messages", false], // spends on the estate's model key: dedicated only
   ["GET", "/gateway/presets", true],
@@ -76,8 +75,10 @@ const EXCLUDED: [string, string][] = [
   ["GET", "/registry/agents/invoice-bot"],
   ["POST", "/registry/agents/invoice-bot/attest"],
   ["POST", "/registry/discover"],
-  // delegation beyond mint/revoke
+  // delegation beyond mint (revoke is an operator action, not a customer route: decision line 34 A)
+  ["POST", `/delegation/tokens/${TOKEN}/revoke`],
   ["GET", `/delegation/tokens/${TOKEN}`],
+  ["GET", `/delegation/tokens/${TOKEN}/revoke`],
   ["POST", "/delegation/introspect"],
   ["POST", "/delegation/oauth/introspect"],
   // lifecycle, sentinel, gateway extras
@@ -112,7 +113,6 @@ const WRONG_METHOD: [string, string][] = [
   ["DELETE", "/registry/agents"],
   ["PATCH", "/delegation/tokens"],
   ["GET", "/delegation/tokens"], // the token list is not forwarded: the path exists only for POST (mint)
-  ["GET", `/delegation/tokens/${TOKEN}/revoke`],
   ["GET", "/gateway/v1/messages"],
   ["POST", "/ledger/health"],
   ["HEAD", "/ledger/health"],
