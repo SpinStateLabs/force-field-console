@@ -178,7 +178,8 @@ describe("gateway handler: a refused request never reaches fetch", () => {
     e.url = "https://user:pw@other.example";
     await saveEstate(e);
     const res = await handler(new Request("https://force-field-console.netlify.app/api/v1/sentinel/check", { headers: { "x-api-key": key } }), ctx);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(502);
+    expect((await res.json()).error.code).toBe("estate_misconfigured");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

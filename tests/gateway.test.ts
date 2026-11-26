@@ -88,7 +88,7 @@ describe("gateway", () => {
   });
 
   it("proxies to ESTATE_URL with stripped path, estate headers, and no client credentials", async () => {
-    process.env.ESTATE_URL = "http://estate.test";
+    process.env.ESTATE_URL = "https://estate.test";
     process.env.ESTATE_SHARED_SECRET = "shared-secret-test";
 
     const calls: { url: string; headers: Headers }[] = [];
@@ -128,7 +128,7 @@ describe("gateway", () => {
 
     expect(calls).toHaveLength(1);
     // /api/v1 stripped; search preserved.
-    expect(calls[0].url).toBe("http://estate.test/registry/agents?limit=5");
+    expect(calls[0].url).toBe("https://estate.test/registry/agents?limit=5");
     expect(calls[0].headers.get("x-field-auth")).toBe("shared-secret-test");
     expect(calls[0].headers.get("x-ff-tenant")).toBe(user.id);
     expect(calls[0].headers.get("x-field-agent-id")).toBe("invoice-bot");
@@ -142,7 +142,7 @@ describe("gateway", () => {
   });
 
   it("429 with Retry-After once the minute budget is exhausted", async () => {
-    process.env.ESTATE_URL = "http://estate.test";
+    process.env.ESTATE_URL = "https://estate.test";
     vi.stubGlobal(
       "fetch",
       vi.fn(

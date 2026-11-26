@@ -8,7 +8,16 @@ import { env } from "../../src/lib/store";
 import { lookupKey } from "../../src/lib/keys";
 import { checkRateLimit } from "../../src/lib/ratelimit";
 import { getEstate, resolveRoute } from "../../src/lib/estates";
-import { FORWARDED_CALLER_HEADERS, GATEWAY_PREFIX, rawPathRefusal, upstreamTarget } from "../../src/lib/upstream";
+import { estateOrigin } from "../../src/lib/fly";
+import {
+  FORWARDED_CALLER_HEADERS,
+  GATEWAY_PREFIX,
+  isRedirectStatus,
+  logRefusal,
+  rawPathRefusal,
+  upstreamTarget,
+  type RefusalCode,
+} from "../../src/lib/upstream";
 
 function err(status: number, code: string, message: string, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
@@ -17,16 +26,22 @@ function err(status: number, code: string, message: string, headers?: Record<str
   });
 }
 
+/** A refused request: one log line with the reason code only (no path, no header), then a fixed error body. */
+function refuse(reason: RefusalCode, status: number, code: string, message: string): Response {
+  logRefusal(reason);
+  return err(status, code, message);
+}
+
 export default async (req: Request, _context: Context): Promise<Response> => {
   // --- Refuse an unsafe raw path before anything else (src/lib/upstream.ts). Decided on the raw req.url string,
   // never on the parsed pathname, because parsing resolves encoded dot segments and turns "\" into "/". ---
   const refusal = rawPathRefusal(req.url);
   if (refusal) {
-    return err(400, "bad_path", "The request path is not accepted (" + refusal + ").");
+    return refuse(refusal, 400, "bad_path", "The request path is not accepted (" + refusal + ").");
   }
   const url = new URL(req.url);
   if (!url.pathname.startsWith(GATEWAY_PREFIX + "/")) {
-    return err(400, "bad_path", "The request path is not accepted (outside " + GATEWAY_PREFIX + "/).");
+    return refuse("outside_prefix", 400, "bad_path", "The request path is not accepted (outside " + GATEWAY_PREFIX + "/).");
   }
 
   // --- Authenticate: x-api-key only. Sessions do not grant engine access. ---
@@ -58,13 +73,19 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   // --- Tenant routing: a ready dedicated estate, else the shared sandbox. ---
   // Provisioning / suspended / failed estates are refused honestly rather than
   // silently falling back to the sandbox (which would mix the tenant's data).
-  const route = resolveRoute(user, await getEstate(user.id));
+  const estate = await getEstate(user.id);
+  const route = resolveRoute(user, estate);
   if (route.kind === "refuse") {
     return err(route.status, route.code, route.message);
   }
   let estateUrl: string | undefined;
   let sharedSecret: string | undefined;
   if (route.kind === "estate") {
+    // A dedicated estate is reached only at the origin derived from its own app name; a stored url that differs
+    // (a corrupted or tampered record) sends nothing.
+    if (!estate || route.url !== estateOrigin(estate.app)) {
+      return refuse("estate_url_mismatch", 502, "estate_misconfigured", "Your dedicated estate's address could not be verified; nothing was sent. Contact Spin State Labs.");
+    }
     estateUrl = route.url;
     sharedSecret = route.secret;
   } else {
@@ -85,7 +106,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   // perimeter secret and the tenant header are attached only below, after this check has passed. ---
   const targetUrl = upstreamTarget(url.pathname, url.search, estateUrl);
   if (!targetUrl) {
-    return err(400, "bad_path", "The request path is not accepted (it does not resolve inside the estate).");
+    return refuse("target_outside_base", 400, "bad_path", "The request path is not accepted (it does not resolve inside the estate).");
   }
   const target = targetUrl.toString();
 
@@ -116,10 +137,13 @@ export default async (req: Request, _context: Context): Promise<Response> => {
 
   let upstream: Response;
   try {
+    // redirect: "manual": a redirect from the estate is never followed (a followed cross-origin redirect would carry
+    // the perimeter secret, the tenant header, the caller's token and, on 307/308, the body to another host).
     upstream = await fetch(target, {
       method: req.method,
       headers,
       body,
+      redirect: "manual",
       signal: AbortSignal.timeout(30000),
     });
   } catch (e: any) {
@@ -127,6 +151,11 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       return err(504, "upstream_timeout", "The engine estate did not respond within 30 seconds.");
     }
     return err(502, "upstream_unreachable", "Could not reach the engine estate.");
+  }
+  // Any 3xx from the estate (or an opaque redirect, status 0) becomes a fixed 502: no Location, no upstream body.
+  if (isRedirectStatus(upstream.status) || upstream.type === "opaqueredirect") {
+    await upstream.body?.cancel().catch(() => undefined);
+    return refuse("upstream_redirect", 502, "upstream_redirect", "The engine estate answered with a redirect; it was not followed.");
   }
 
   // Buffer and return the upstream status, body, and content-type verbatim.
