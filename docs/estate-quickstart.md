@@ -123,3 +123,23 @@ generated inside your estate at bootstrap and the private key never leaves it.
   operator action, never automatic.
 - The three platform self-agents inside your estate (sentinel, gateway, crosswalk) renew their own
   30-day tokens automatically after 25 days, with one brief restart.
+
+## Which calls the console forwards
+
+The console's gateway forwards only these calls. On the shared sandbox (an account with no dedicated estate) the
+calls marked "dedicated only" answer `403 not_on_sandbox`. Any other path answers `404`; a listed path with another
+method answers `405`. Token revocation is an operator action and is not offered here.
+
+| Method | Path (after `/api/v1`) | Where |
+|---|---|---|
+| POST | `/registry/agents` | dedicated only |
+| GET | `/registry/agents` | dedicated only |
+| POST | `/delegation/tokens` | dedicated only |
+| POST | `/sentinel/check` | dedicated and sandbox |
+| POST | `/gateway/v1/messages` | dedicated only |
+| GET | `/gateway/presets` | dedicated and sandbox |
+| GET | `/gateway/presets/<name>` | dedicated and sandbox |
+| GET | `/attest/pack` | dedicated only |
+| GET | `/attest/pack.html` | dedicated only |
+| GET | `/ledger/health` | dedicated and sandbox |
+| GET | `/lifecycle/findings` | dedicated only |
