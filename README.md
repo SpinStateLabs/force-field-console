@@ -115,11 +115,15 @@ Browser ── static pages (public/, Netlify CDN)
                           Engine estate: single origin, path-prefixed services, guarded by x-field-auth
 ```
 
-The gateway forwards method, body, `content-type`, `accept`, and the caller's `x-field-*` /
-`x-force-*` headers (the agent identity an enforcing estate gateway requires on `/v1/messages`:
-`x-field-agent-id`, `x-field-token`, `x-field-action`, `x-force-preset`); it sets `x-field-auth`
-(the estate's secret) and `x-ff-tenant` (the caller's user id) itself, overriding any caller value,
-and never forwards client cookies, `Authorization` or `x-api-key`. A provisioning estate answers `503 estate_provisioning`, a
+The gateway forwards only the routes the customer docs promise (`ALLOWED_ROUTES` in
+`src/lib/upstream.ts`; the table is in `docs/estate-quickstart.md`, "Which calls the console forwards"):
+on the shared sandbox only `POST /sentinel/check`, `GET /gateway/presets[/<name>]` and `GET /ledger/health`
+(anything else documented answers `403 not_on_sandbox`); on a ready dedicated estate the full documented set.
+Any other path answers `404`, a documented path with another method `405`. It forwards method, body,
+`content-type`, `accept` and four caller headers (`x-field-agent-id`, `x-field-token`, `x-field-action`,
+`x-force-preset`); it sets `x-field-auth` (the estate's secret) and `x-ff-tenant` (the caller's user id)
+itself, and never forwards client cookies, `Authorization`, `x-api-key` or any other `x-field-*` /
+`x-force-*` header. It never follows a redirect from the estate (a 3xx becomes `502`). A provisioning estate answers `503 estate_provisioning`, a
 suspended one `403 estate_suspended`, a failed one `503 estate_error` — never a silent fall
 back to the sandbox, which would mix a tenant's data. The one way back to the sandbox is explicit:
 the owner releases a suspended estate (`POST /api/estate/release`, see "Dedicated estates" below).
