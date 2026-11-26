@@ -101,7 +101,9 @@ describe("B1: no provisioning driver touches Fly for an account that may not run
     await record({ status: "pending_manual" });
     const body = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
     expect(flyCalls.filter((u) => u.includes("machines.dev"))).toEqual([]);
-    expect(body.outcomes.direct_idle).toBe(1);
+    // LOW 1 (review #29 full verdict): the tick now skips a parked record before kicking a worker or advancing it.
+    expect(body.outcomes.parked).toBe(1);
+    expect(body.outcomes.direct_idle ?? 0).toBe(0);
     expect((await getEstate(user.id))!.status).toBe("pending_manual");
   });
 

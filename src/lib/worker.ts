@@ -56,7 +56,7 @@ export async function kickWorker(userId: string, action: WorkerAction = "advance
 
 export type WorkerResult = {
   iterations: number;
-  last: AdvanceOutcome | "no_estate" | "worker_active" | "renewed" | "not_due" | "renew_failed" | "upgraded" | "unchanged" | "upgrade_failed";
+  last: AdvanceOutcome | "no_estate" | "worker_active" | "renewed" | "not_due" | "renew_failed" | "renew_skipped_ineligible" | "upgraded" | "unchanged" | "upgrade_failed";
   status: string | null;
 };
 
