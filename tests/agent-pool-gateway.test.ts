@@ -1,7 +1,7 @@
 // Agent pool enforcement at the portal gateway (price book rev 2): a dedicated-estate account may run at most
 // billing.agent_pool governed agents. Counted = the estate registry's agents that are NOT retired and NOT platform
-// self-agents. Gated: registering (POST /registry/agents) and reviving a retired agent (PATCH .../{id} with a
-// non-retired status). Path variants that the upstream would route the same way are gated too. Fail closed when the
+// self-agents. Gated: registering (POST /registry/agents). PATCH /registry/agents/<id> (which could revive a retired
+// agent) is not forwarded by the console at all. Path variants that the upstream would route the same way are gated too. Fail closed when the
 // count cannot be read. The shared sandbox is not gated (no pool).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import handler from "../netlify/functions/gateway.mts";
@@ -9,6 +9,8 @@ import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
 import { issueKey } from "../src/lib/keys";
 import { SELF_OWNER, queueEstate, saveEstate } from "../src/lib/estates";
+import { ALLOWED_ROUTES, routeDecision } from "../src/lib/upstream";
+import { classify } from "../src/lib/agentpool";
 
 const ctx = {} as any;
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
@@ -100,6 +102,9 @@ describe("registering an agent", () => {
     expect(body.error.code).toBe("agent_pool_full");
     expect(body.error.agent_pool).toBe(3);
     expect(body.error.in_use).toBe(3);
+    // customers cannot retire through the console: the message must not tell them to
+    expect(body.error.message).toMatch(/contact Spin State Labs/);
+    expect(body.error.message).not.toMatch(/^Retire|\. Retire an agent/);
     expect(calls.filter((c) => c.method === "POST")).toEqual([]);
   });
 
@@ -164,6 +169,17 @@ describe("reviving or changing an agent (PATCH)", () => {
     }
     expect(agents.find((a) => a.agent_id === "old")!.status).toBe("retired");
     expect(calls).toEqual([]);
+  });
+
+  it("PATCH stays off the route allowlist, and the pool gate has no revival branch", () => {
+    expect(ALLOWED_ROUTES.some((r) => r.method.toUpperCase() === "PATCH")).toBe(false);
+    for (const p of ["/registry/agents/old", "/registry/agents", "/registry/agents/old/status"]) {
+      expect(routeDecision("PATCH", p, "estate").ok, p).toBe(false);
+      expect(routeDecision("PATCH", p, "sandbox").ok, p).toBe(false);
+    }
+    const revive = new TextEncoder().encode(JSON.stringify({ status: "active" })).buffer as ArrayBuffer;
+    expect(classify("PATCH", "/registry/agents/old", revive)).toBeNull();
+    expect(classify("POST", "/registry/agents", undefined)).toEqual({ kind: "register" });
   });
 });
 
