@@ -12,11 +12,6 @@ import { estateOrigin } from "../../src/lib/fly";
 import { agentsInUse, canonicalPath, classify, poolFor } from "../../src/lib/agentpool";
 import { LockBusyError, withAgentPoolLock } from "../../src/lib/locks";
 
-class UpstreamReadError extends Error {
-  constructor(public status: number) {
-    super("upstream " + status);
-  }
-}
 import {
   FORWARDED_CALLER_HEADERS,
   GATEWAY_PREFIX,
@@ -27,6 +22,12 @@ import {
   upstreamTarget,
   type RefusalCode,
 } from "../../src/lib/upstream";
+
+class UpstreamReadError extends Error {
+  constructor(public status: number) {
+    super("upstream " + status);
+  }
+}
 
 function err(status: number, code: string, message: string, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
@@ -219,18 +220,6 @@ export default async (req: Request, _context: Context): Promise<Response> => {
 
   try {
     return await withAgentPoolLock(user.id, async () => {
-      if (gate.kind === "maybe_revive") {
-        let current: any;
-        try {
-          current = await readUpstream("/registry/agents/" + encodeURIComponent(gate.agent_id));
-        } catch (e) {
-          // 404: no such agent, the upstream answers the PATCH itself and nothing can be revived. Any other failure is
-          // fail closed: the PATCH might revive a retired agent past the pool.
-          if (e instanceof UpstreamReadError && e.status === 404) return forward();
-          return err(503, "agent_count_unavailable", "The agent's current status could not be read; nothing was changed. Retry shortly.");
-        }
-        if (String(current?.status ?? "").toLowerCase() !== "retired") return forward(); // not a revival
-      }
       let inUse: number | null = null;
       try {
         inUse = agentsInUse(await readUpstream("/registry/agents"));
@@ -245,7 +234,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
           JSON.stringify({
             error: {
               code: "agent_pool_full",
-              message: `Your plan allows ${pool} governed agents and ${inUse} are in use. Retire an agent, add seats, or add a top-up pack.`,
+              message: `Your plan allows ${pool} governed agents and ${inUse} are in use. Add seats or a top-up pack, or contact Spin State Labs to retire an agent.`,
               agent_pool: pool,
               in_use: inUse,
             },

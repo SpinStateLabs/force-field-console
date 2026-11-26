@@ -2,8 +2,9 @@
 // A dedicated-estate account may run at most its pool of agents: billing.agent_pool, recorded by the Stripe webhook
 // from seats and packs (src/lib/billing.ts), or, for a subscription recorded before seats existed, the pool of the
 // tier's minimum seat count. Counted = the estate registry's agents that are NOT retired and NOT platform self-agents.
-// Gated: registering an agent and reviving a retired one. Retiring, reading and every other service pass untouched, so
-// a customer over the pool (seats lowered) can always get back under it.
+// Gated: registering an agent (POST /registry/agents). Changing an agent (PATCH /registry/agents/<id>, which includes
+// reviving a retired one) is not forwarded by the console at all (it is not in ALLOWED_ROUTES, src/lib/upstream.ts),
+// so there is no revival path to gate; retiring is an operator action for now.
 import type { User } from "./users";
 import { SELF_AGENTS, SELF_OWNER } from "./estates";
 
@@ -32,22 +33,12 @@ export function canonicalPath(subPath: string): string | null {
   return p;
 }
 
-export type PoolGate = { kind: "register" } | { kind: "maybe_revive"; agent_id: string } | null;
+export type PoolGate = { kind: "register" } | null;
 
-/** Which requests can add an agent to the pool. A PATCH is a revival only if it sets a non-retired status. */
-export function classify(method: string, canon: string, body: ArrayBuffer | undefined): PoolGate {
+/** Which forwarded requests can add an agent to the pool: only registering. (`body` is kept for the call site.) */
+export function classify(method: string, canon: string, _body?: ArrayBuffer | undefined): PoolGate {
   const m = method.toUpperCase();
   if (m === "POST" && canon === "/registry/agents") return { kind: "register" };
-  const one = /^\/registry\/agents\/([^/]+)$/.exec(canon);
-  if (one && m === "PATCH") {
-    let status: unknown;
-    try {
-      status = JSON.parse(new TextDecoder().decode(body ?? new ArrayBuffer(0)))?.status;
-    } catch {
-      return null; // not JSON: the upstream refuses it; nothing is revived
-    }
-    if (typeof status === "string" && status.toLowerCase() !== "retired") return { kind: "maybe_revive", agent_id: one[1] };
-  }
   return null;
 }
 
