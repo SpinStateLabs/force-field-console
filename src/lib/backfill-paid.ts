@@ -35,7 +35,7 @@ export type EstateOutlook = {
   subscription_status: string | null;
   /** True when the current subscription is active AND paid (already recorded, or written by this backfill). */
   may_run: boolean;
-  outlook: "runs" | "parked (no provisioning)" | "suspended on the next subscription event" | "kept running (paid, not active)" | "stays suspended" | "unchanged";
+  outlook: "runs" | "resumes (suspended; owner active and paid)" | "held (test-mode grant; never started)" | "parked (no provisioning)" | "suspended on the next subscription event" | "kept running (paid, not active)" | "stays suspended" | "unchanged";
 };
 
 export type BackfillPlan = { rows: BackfillRow[]; estates: EstateOutlook[] };
@@ -92,7 +92,7 @@ async function planSubscription(
   const invoices = await paidInvoicesOf(cfg, subId, fetchImpl);
   const inv = selectFirstTierPayment(invoices, subId, customer, cfg);
   if (!inv) {
-    const truncated = invoices.some((i) => i?.subscription === subId && i?.lines?.has_more === true);
+    const truncated = invoices.some((i) => (i?.subscription ?? i?.parent?.subscription_details?.subscription) === subId && i?.lines?.has_more === true);
     return { ...withStatus, reason: truncated ? "no qualifying invoice on the first page of lines (lines truncated): check by hand" : "no paid invoice with a positive NET tier line in the price book currency" };
   }
   return {
@@ -129,7 +129,11 @@ export async function planBackfill(cfg: StripeConfig, now: Date = new Date(), fe
     const paidAfter = !!subId && (cur.reason === "paid record already exists" || cur.action === "write");
     const granting = !!u && u.tier !== "sandbox" && !!b && ["active", "trialing", "past_due"].includes(b.status);
     const mayRun = granting && b!.status === "active" && paidAfter;
-    const outlook: EstateOutlook["outlook"] = mayRun
+    const outlook: EstateOutlook["outlook"] = e.test_hold
+      ? "held (test-mode grant; never started)"
+      : mayRun && e.status === "suspended"
+        ? "resumes (suspended; owner active and paid)"
+        : mayRun
       ? "runs"
       : e.status === "provisioning" || e.status === "pending_manual" || e.status === "error"
         ? granting && paidAfter && e.status === "error"

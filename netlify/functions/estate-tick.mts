@@ -12,6 +12,7 @@ import { UPGRADE_DEFER_MS, advanceEstate, autoRetryFailedEstate, checkEstateHeal
 import { userLockAgeMs } from "../../src/lib/locks";
 import { getUserById } from "../../src/lib/users";
 import { flyHeld, mayRunEstate, retryPendingSuspend } from "../../src/lib/billing";
+import { mayRunEstateFor } from "../../src/lib/paid";
 import { portalStore } from "../../src/lib/store";
 import { renewalDue } from "../../src/lib/renewal";
 import { kickWorker } from "../../src/lib/worker";
@@ -149,6 +150,12 @@ export default async (_req: Request): Promise<Response> => {
 
   for (const e of pending) {
     if (Date.now() - started > BUDGET_MS) break;
+    // A record whose owner may not run an estate is parked by advanceEstate anyway: skip it here, so parked records
+    // never use up the tick's budget ahead of renewals (review #29 full verdict, LOW 1).
+    if (!(await mayRunEstateFor(e.user_id))) {
+      bump("parked");
+      continue;
+    }
     if (await kickWorker(e.user_id, "advance")) {
       bump("kicked");
       continue;
@@ -163,6 +170,12 @@ export default async (_req: Request): Promise<Response> => {
   }
   for (const e of due) {
     if (Date.now() - started > BUDGET_MS) break;
+    // LOW 3: no renewal for an owner who may not run the estate (its machine may be stopped; the in-machine mint would
+    // fail and be retried every tick). It renews once the owner qualifies again.
+    if (!(await mayRunEstateFor(e.user_id))) {
+      bump("renew_skipped_ineligible");
+      continue;
+    }
     bump((await kickWorker(e.user_id, "renew")) ? "renew_kicked" : "renew_kick_failed");
   }
 

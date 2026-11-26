@@ -218,6 +218,38 @@ describe("planBackfill (read-only)", () => {
     expect(by(dunning)).toBe("kept running (paid, not active)");
   });
 
+  it("outlook labels: a suspended estate of an active, paid owner resumes; a test-held record is held", async () => {
+    const mk = async (email: string, sub: string, over: Record<string, any>) => {
+      const u = await createUser(email, "sufficiently-long-pass");
+      u.tier = "operator";
+      u.billing = { customer_id: "cus_1", subscription_id: sub, status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" } as any;
+      await saveUser(u);
+      const e = await queueEstate(u);
+      Object.assign(e, over);
+      await saveEstate(e);
+      return u;
+    };
+    const resumes = await mk("r1@example.com", "sub_r1", { status: "suspended" });
+    const held = await mk("r2@example.com", "sub_r2", { status: "pending_manual", test_hold: true });
+    const subs = Object.fromEntries(["sub_r1", "sub_r2"].map((id) => [id, { id, status: "active", customer: "cus_1" }]));
+    const s = stripe(subs, { sub_r1: [inv({ subscription: "sub_r1" })], sub_r2: [inv({ subscription: "sub_r2" })] });
+    const { estates } = await planBackfill(stripeConfig()!, NOW, s.impl);
+    const by = (u: User) => estates.find((x) => x.user_id === u.id)!;
+    expect(by(resumes)).toMatchObject({ may_run: true, outlook: "resumes (suspended; owner active and paid)" });
+    expect(by(held).outlook).toBe("held (test-mode grant; never started)");
+  });
+
+  it("truncated lines are also flagged when the invoice names its subscription only under parent.subscription_details", async () => {
+    await legacyReady();
+    const s = stripe(
+      { sub_1: { id: "sub_1", status: "active", customer: "cus_1" } },
+      { sub_1: [inv({ subscription: undefined, parent: { subscription_details: { subscription: "sub_1" } }, lines: { data: [{ price: { id: "price_pack" }, amount: 2400 }], has_more: true } })] },
+    );
+    const { rows } = await planBackfill(stripeConfig()!, NOW, s.impl);
+    expect(rows[0]).toMatchObject({ action: "skip" });
+    expect(rows[0].reason).toMatch(/truncated/);
+  });
+
   it("reads every page of paid invoices", async () => {
     await legacyReady();
     const invoices = Array.from({ length: 5 }, (_, i) => inv({ id: "in_" + i, created: 100 + i, amount_paid: i < 4 ? 0 : 2400 }));
