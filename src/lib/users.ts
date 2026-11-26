@@ -66,23 +66,65 @@ const LONE_SURROGATE = /\p{Cs}/u;
 
 /**
  * True when `email`, exactly as given, is acceptable for a new account (whitespace anywhere is refused, as before).
- * The length bound applies to the value as given AND to the stored form (trimmed, lower-cased: see createUser), because
- * lower-casing can lengthen a string (for example U+0130 becomes two code units).
+ * The length bound applies to the value as given AND to the stored form (canonicalEmail: trimmed, lower-cased, NFC),
+ * because lower-casing and NFC can lengthen a string (for example U+0130 lower-cases to two code units). A domain
+ * ending in a dot is refused.
  */
 export function isAcceptableEmail(email: unknown): email is string {
   if (typeof email !== "string") return false;
   if (email.length === 0 || email.length > MAX_EMAIL_LENGTH) return false;
   if (LONE_SURROGATE.test(email)) return false;
   if (UNSAFE_EMAIL_CHARS.test(email)) return false;
-  if (email.trim().toLowerCase().length > MAX_EMAIL_LENGTH) return false;
-  return EMAIL_RE.test(email);
+  if (canonicalEmail(email).length > MAX_EMAIL_LENGTH) return false;
+  if (!EMAIL_RE.test(email)) return false;
+  // "a@example.com." names the same mailbox as "a@example.com" in DNS: refuse it so one address cannot hold two accounts.
+  return !email.endsWith(".");
+}
+
+/**
+ * The stored form of an email: trimmed, lower-cased, then Unicode NFC. Two spellings of the same address that differ
+ * only in normalisation form (a precomposed "\u00e9" or "e" + U+0301) have one stored form and one user key. For ASCII
+ * addresses this is exactly the old form (trimmed, lower-cased), so every existing ASCII account keeps its key.
+ */
+export function canonicalEmail(email: string): string {
+  return email.trim().toLowerCase().normalize("NFC");
+}
+
+/** The old stored form (trimmed, lower-cased, not normalised): accounts created before NFC keys live under it. */
+function legacyForms(email: string): string[] {
+  const lowered = email.trim().toLowerCase();
+  return [lowered, lowered.normalize("NFD")];
+}
+
+function keyOf(normalized: string): string {
+  return "users/" + createHash("sha256").update(normalized).digest("hex");
+}
+
+/**
+ * Every key an account for `email` may live under, the current (NFC) key first. Accounts created before NFC keys were
+ * stored under sha256(trimmed, lower-cased email as typed): the as-typed and NFD spellings cover them.
+ */
+export function candidateEmailKeys(email: string): string[] {
+  const keys = [emailKey(email)];
+  for (const form of legacyForms(email)) {
+    const k = keyOf(form);
+    if (!keys.includes(k)) keys.push(k);
+  }
+  return keys;
 }
 const MIN_PASSWORD_LENGTH = 10;
 
-/** Blob key for a user record: "users/" + sha256hex(normalized email). */
+/** Blob key for a new user record: "users/" + sha256hex(canonicalEmail(email)). */
 export function emailKey(email: string): string {
-  const normalized = email.trim().toLowerCase();
-  return "users/" + createHash("sha256").update(normalized).digest("hex");
+  return keyOf(canonicalEmail(email));
+}
+
+async function findByEmail(store: Awaited<ReturnType<typeof portalStore>>, email: string): Promise<User | null> {
+  for (const key of candidateEmailKeys(email)) {
+    const user = (await store.get(key, { type: "json" })) as User | null;
+    if (user) return user;
+  }
+  return null;
 }
 
 export async function createUser(email: string, password: string): Promise<User> {
@@ -93,12 +135,12 @@ export async function createUser(email: string, password: string): Promise<User>
 
   const store = await portalStore();
   const key = emailKey(email);
-  const existing = await store.get(key, { type: "json" });
+  const existing = await findByEmail(store, email);
   if (existing) throw new EmailTaken("An account with this email already exists.");
 
   const user: User = {
     id: crypto.randomUUID(),
-    email: email.trim().toLowerCase(),
+    email: canonicalEmail(email),
     pw_hash: bcrypt.hashSync(password, 10),
     tier: "sandbox",
     created_at: new Date().toISOString(),
@@ -112,7 +154,8 @@ export async function createUser(email: string, password: string): Promise<User>
 
 export async function verifyUser(email: string, password: string): Promise<User | null> {
   const store = await portalStore();
-  const user = (await store.get(emailKey(email), { type: "json" })) as User | null;
+  if (typeof email !== "string") return null;
+  const user = await findByEmail(store, email);
   if (!user) return null;
   return bcrypt.compareSync(password, user.pw_hash) ? user : null;
 }
@@ -125,8 +168,15 @@ export async function getUserById(id: string): Promise<User | null> {
   return user ?? null;
 }
 
-/** Rewrite the user's blob record (keyed by email hash). */
+/**
+ * Rewrite the user's blob record AT THE KEY THE uid/<id> POINTER NAMES. An account created before NFC keys may live
+ * under its old key; writing to emailKey(u.email) (the NFC key) would fork it: a second record that by-id reads
+ * (billing, keys, the gateway) never see. Only a user with no pointer at all (never stored by createUser) falls back
+ * to emailKey.
+ */
 export async function saveUser(u: User): Promise<void> {
   const store = await portalStore();
-  await store.setJSON(emailKey(u.email), u);
+  const pointer = (await store.get("uid/" + u.id, { type: "json" })) as { email_key?: string } | null;
+  const key = typeof pointer?.email_key === "string" && pointer.email_key.startsWith("users/") ? pointer.email_key : emailKey(u.email);
+  await store.setJSON(key, u);
 }
