@@ -7,6 +7,7 @@ import type { Context, Config } from "@netlify/functions";
 import { env } from "../../src/lib/store";
 import { lookupKey } from "../../src/lib/keys";
 import { checkRateLimit } from "../../src/lib/ratelimit";
+import { takeSandboxCheck, takeSandboxGlobal } from "../../src/lib/sandboxlimit";
 import { getEstate, newAppName, resolveRoute } from "../../src/lib/estates";
 import { estateOrigin } from "../../src/lib/fly";
 import {
@@ -109,6 +110,21 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   const decision = routeDecision(req.method, url.pathname.slice(GATEWAY_PREFIX.length), route.kind);
   if (!decision.ok) {
     return refuse(decision.reason, decision.status, decision.code, decision.message);
+  }
+
+  // --- Shared sandbox: sentinel checks are also counted per account (src/lib/sandboxlimit.ts), after the allowlist so
+  // a refused path never counts, and before anything is sent. The optional ceiling across all accounts comes first. ---
+  if (route.kind === "sandbox" && req.method.toUpperCase() === "POST" && url.pathname.slice(GATEWAY_PREFIX.length) === "/sentinel/check") {
+    const all = await takeSandboxGlobal();
+    if (!all.allowed) {
+      logRefusal("sandbox_busy");
+      return err(503, "sandbox_busy", "The shared sandbox is busy; retry after the window resets.", { "retry-after": String(all.retry_after_s) });
+    }
+    const mine = await takeSandboxCheck(user.id);
+    if (!mine.allowed) {
+      logRefusal("sandbox_account_limit");
+      return err(429, "rate_limited_account", "The shared sandbox limits sentinel checks per account; retry after the window resets.", { "retry-after": String(mine.retry_after_s) });
+    }
   }
 
   // --- Proxy. Strip the /api/v1 prefix; keep the query string. The target is built with the URL constructor against

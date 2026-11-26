@@ -335,6 +335,12 @@ verified, not what a mature SaaS would do.
 - **Rate limiting is approximate.** Counters use read-increment-write blob storage with
   last-write-wins semantics, so concurrent requests can under-count. Limits are Declared,
   not Enforced hard caps.
+- **Shared sandbox: sentinel checks per account.** On the shared sandbox, `POST /sentinel/check` is
+  also counted per account, across all of the account's keys (`src/lib/sandboxlimit.ts`;
+  `SANDBOX_ACCOUNT_RPM` / `SANDBOX_ACCOUNT_RPD`, default the sandbox tier's numbers). It uses
+  conditional writes and refuses (`429 rate_limited_account`, with `retry-after`) rather than
+  under-count. An optional ceiling across all accounts (`SANDBOX_GLOBAL_RPM`, off unless set) answers
+  `503 sandbox_busy`; it is approximate.
 - **Provisioning concurrency is best-effort**: the estate record is CREATED with a create-only
   write (`@netlify/blobs` `onlyIfNew`: two racing creators end up with one record), the Stripe
   webhook CLAIMS each event id the same way before handling it (a concurrent delivery is a no-op;
