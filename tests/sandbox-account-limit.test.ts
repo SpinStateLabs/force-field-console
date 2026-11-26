@@ -137,6 +137,17 @@ describe("shared sandbox: sentinel checks per account", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("a minute counter write that keeps losing is refused too", async () => {
+    const k = await newKey(await account("busy-minute@example.com"));
+    expect((await send(k)).status).toBe(200);
+    const real = store.setJSONIfMatch.bind(store);
+    store.setJSONIfMatch = async (key: string, v: any, etag: string) => (key.includes("/m") ? false : real(key, v, etag));
+    const r = await send(k);
+    expect(r.status).toBe(429);
+    expect(r.headers.get("retry-after")).toBe("1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("the ceiling across accounts, when set, answers 503 sandbox_busy; off by default", async () => {
     const keys = [];
     for (const e of ["g1@example.com", "g2@example.com", "g3@example.com"]) keys.push(await newKey(await account(e)));
