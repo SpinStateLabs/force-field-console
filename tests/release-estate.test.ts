@@ -530,7 +530,7 @@ describe("POST /api/estate/release and the gateway route afterwards", () => {
   it("the suspended account is refused by the gateway, released by its owner, and then reaches the shared sandbox with the same key", async () => {
     const e = await suspendedEstate();
     const key = (await issueKey((await getUserById(user.id))!, "v4")).plaintext;
-    const call = () => gatewayHandler(new Request("http://portal.test/api/v1/health?x=1", { headers: { "x-api-key": key, "x-field-agent-id": "svc-verifier" } }), ctx);
+    const call = () => gatewayHandler(new Request("http://portal.test/api/v1/ledger/health?x=1", { headers: { "x-api-key": key, "x-field-agent-id": "svc-verifier" } }), ctx);
 
     const before = await call();
     expect([before.status, await code(before)]).toEqual([403, "estate_suspended"]);
@@ -548,7 +548,7 @@ describe("POST /api/estate/release and the gateway route afterwards", () => {
     const after = await call();
     expect(after.status).toBe(200);
     expect(seen).toHaveLength(1);
-    expect(seen[0].url).toBe("https://sandbox.example/health?x=1");
+    expect(seen[0].url).toBe("https://sandbox.example/ledger/health?x=1");
     expect(seen[0].headers.get("x-field-auth")).toBe("sandbox-secret");
     expect(seen[0].headers.get("x-ff-tenant")).toBe(user.id);
     expect(seen[0].headers.get("x-field-agent-id")).toBe("svc-verifier");

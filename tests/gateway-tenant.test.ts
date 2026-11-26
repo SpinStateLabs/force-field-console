@@ -71,9 +71,9 @@ describe("gateway tenant routing", () => {
     const e = await queueEstate(user);
     expect(e.status).toBe("pending_manual");
     const seen = captureFetch();
-    const res = await handler(new Request("http://portal.test/api/v1/registry/health", { headers: { "x-api-key": key } }), ctx);
+    const res = await handler(new Request("http://portal.test/api/v1/ledger/health", { headers: { "x-api-key": key } }), ctx);
     expect(res.status).toBe(200);
-    expect(seen[0].url).toBe("https://sandbox.example/registry/health");
+    expect(seen[0].url).toBe("https://sandbox.example/ledger/health");
     expect(seen[0].headers.get("x-field-auth")).toBe("sandbox-secret");
   });
 });
