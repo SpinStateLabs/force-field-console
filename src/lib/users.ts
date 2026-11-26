@@ -168,8 +168,15 @@ export async function getUserById(id: string): Promise<User | null> {
   return user ?? null;
 }
 
-/** Rewrite the user's blob record (keyed by email hash). */
+/**
+ * Rewrite the user's blob record AT THE KEY THE uid/<id> POINTER NAMES. An account created before NFC keys may live
+ * under its old key; writing to emailKey(u.email) (the NFC key) would fork it: a second record that by-id reads
+ * (billing, keys, the gateway) never see. Only a user with no pointer at all (never stored by createUser) falls back
+ * to emailKey.
+ */
 export async function saveUser(u: User): Promise<void> {
   const store = await portalStore();
-  await store.setJSON(emailKey(u.email), u);
+  const pointer = (await store.get("uid/" + u.id, { type: "json" })) as { email_key?: string } | null;
+  const key = typeof pointer?.email_key === "string" && pointer.email_key.startsWith("users/") ? pointer.email_key : emailKey(u.email);
+  await store.setJSON(key, u);
 }

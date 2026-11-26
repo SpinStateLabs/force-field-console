@@ -5,6 +5,7 @@ import {
   createUser,
   verifyUser,
   getUserById,
+  saveUser,
   BadEmail,
   isAcceptableEmail,
   WeakPassword,
@@ -171,6 +172,30 @@ describe("users", () => {
       await expect(createUser(NFC, GOOD_PASSWORD)).rejects.toBeInstanceOf(EmailTaken);
       await expect(createUser(NFD, GOOD_PASSWORD)).rejects.toBeInstanceOf(EmailTaken);
       expect((await getUserById(legacy.id))?.email).toBe(NFD);
+    });
+
+    it("saveUser on an older non-NFC account rewrites its own record: no second record, by-id reads see the change", async () => {
+      const store = freshStore();
+      const bcrypt = (await import("bcryptjs")).default;
+      const legacy = { id: "22222222-2222-2222-2222-222222222222", email: NFD, pw_hash: bcrypt.hashSync(GOOD_PASSWORD, 4), tier: "sandbox" as const, created_at: "2026-01-01T00:00:00Z", keys: [] as any[] };
+      await store.setJSON(oldKey(NFD), legacy);
+      await store.setJSON("uid/" + legacy.id, { email_key: oldKey(NFD) });
+      const u = (await getUserById(legacy.id))!;
+      u.tier = "operator" as any;
+      await saveUser(u);
+      expect((await getUserById(legacy.id))!.tier).toBe("operator");
+      expect(await store.get(emailKey(NFD), { type: "json" })).toBeNull();
+      expect(((await store.get(oldKey(NFD), { type: "json" })) as any).tier).toBe("operator");
+      expect((await verifyUser(NFC, GOOD_PASSWORD))!.tier).toBe("operator");
+    });
+
+    it("saveUser on a new account still writes its NFC record", async () => {
+      const store = freshStore();
+      const u = await createUser(NFD, GOOD_PASSWORD);
+      u.tier = "operator" as any;
+      await saveUser(u);
+      expect(((await store.get(emailKey(NFC), { type: "json" })) as any).tier).toBe("operator");
+      expect((await getUserById(u.id))!.tier).toBe("operator");
     });
 
     it("refuses a domain that ends in a dot, so one address cannot hold two accounts", async () => {
