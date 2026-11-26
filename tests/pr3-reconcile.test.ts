@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import tickHandler from "../netlify/functions/estate-tick.mts";
 import healthHandler from "../netlify/functions/health.mts";
-import { ModelFly, machinesApiHandler } from "./model-fly";
+import { FLY_LEAK_RE, ModelFly, machinesApiHandler } from "./model-fly";
 import { freshStore } from "./helpers";
 import { createUser, getUserById, saveUser, type User } from "../src/lib/users";
 import { stripeConfig } from "../src/lib/stripe";
@@ -164,7 +164,10 @@ describe("MED b: a resume that failed to start is retried by the tick, bounded, 
     const h = await (await healthHandler(new Request("http://portal.test/api/health"), ctx)).json();
     expect(h.resume_failed).toBe(true);
     const shown = JSON.stringify(publicEstate((await getEstate(user.id))!));
-    expect(shown).not.toMatch(/HTTP|answered|\/apps\/|503/);
+    // CB-3: a bare /503/ also matched random ids and timestamps in the record (an id containing "503"), so the status
+    // code is matched only as a whole number; the shared leak pattern covers the Fly error text itself.
+    expect(shown).not.toMatch(/HTTP|answered|\/apps\/|\b503\b/);
+    expect(shown).not.toMatch(FLY_LEAK_RE);
     expect(await final()).toMatchObject({ estate: "suspended", machine: "stopped", autostartOff: true });
   });
 });
