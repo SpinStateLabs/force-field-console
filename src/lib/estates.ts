@@ -16,6 +16,7 @@
 // verify their ledger and attestations off-box).
 
 import { createHash, createHmac } from "node:crypto";
+import { estateSigner, isSafeIdentityText } from "./signer";
 import { env, portalStore } from "./store";
 import type { User } from "./users";
 import { withUserLock } from "./locks";
@@ -300,8 +301,19 @@ export function estateSecret(app: string, master: string | undefined = env("ESTA
   return createHmac("sha256", master).update("estate-secret:" + app).digest("base64url");
 }
 
-export function attestSigner(grantor: string): string {
-  return `Force-Field estate key for ${grantor} (provisioned by Spin State Labs — standing attestation)`;
+/**
+ * The estate's attestation signer statement, at most 200 characters (src/lib/signer.ts): it names the account email
+ * when the whole statement fits, otherwise a stable account reference from the user id.
+ */
+export function attestSigner(grantor: string, userId: string): string {
+  return estateSigner(grantor, userId);
+}
+
+/** Refuse to write a grantor that is not safe identity text (src/lib/signer.ts) into an estate. */
+function assertSafeGrantor(grantor: string): void {
+  if (!isSafeIdentityText(grantor)) {
+    throw new EstateError(422, "grantor_unsafe", "the account email cannot be written into the estate (length or characters); an operator must review it");
+  }
 }
 
 /**
@@ -594,7 +606,7 @@ export async function advanceEstate(
     return { estate: e, outcome: "waiting", note: "another driver holds the step lease" };
   }
   const origin = estateOrigin(e.app);
-  const signer = attestSigner(e.grantor);
+  const signer = attestSigner(e.grantor, e.user_id);
 
   try {
     switch (step) {
@@ -660,6 +672,7 @@ export async function advanceEstate(
         break;
       }
       case "bootstrap": {
+        assertSafeGrantor(e.grantor);
         const row = { grantor: e.grantor, ...e.roster };
         const r = await fly.exec(e.app, e.machine_id!, ["python3", "-c", BOOTSTRAP_PY, JSON.stringify(row)], 25);
         const out = lastJsonLine(r.stdout);
@@ -1345,6 +1358,7 @@ export async function setEstateAnthropicKey(e: Estate, fly: FlyClient, key: stri
 /** Rewrite the customer's DOA roster row on the estate (read per mint — no restart). */
 export async function updateEstateRoster(e: Estate, fly: FlyClient, input: any, now: Date = new Date()): Promise<Estate> {
   const row = validateRoster(input);
+  assertSafeGrantor(e.grantor);
   if (e.status === "ready") {
     const r = await fly.exec(e.app, e.machine_id!, ["python3", "-c", ROSTER_PY, JSON.stringify({ grantor: e.grantor, ...row })], 20);
     const out = lastJsonLine(r.stdout);
@@ -1478,7 +1492,7 @@ export async function upgradeEstateImage(
   const from = e.image ?? "unknown";
   logEstate(e, "upgrade", `updating the machine image ${from} -> ${target}${opts.force ? " (forced re-apply)" : ""}; armed posture re-verified afterwards`, now);
   await saveEstate(e, now);
-  await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor)));
+  await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor, e.user_id)));
 
   const origin = e.url ?? estateOrigin(e.app);
   const polls = opts.polls ?? 60;

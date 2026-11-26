@@ -200,7 +200,7 @@ export class World {
         a.volumes.push({ id: `vol_${e.app}_1`, name: "ff_data" });
         a.ips.push({ address: "2a09::1", type: "v6" });
         a.shared = "137.66.0.1";
-        const m = this.net.addMachine(e.app, estateMachineConfig(cfg, `vol_${e.app}_1`, "armed", attestSigner(e.grantor)), "started");
+        const m = this.net.addMachine(e.app, estateMachineConfig(cfg, `vol_${e.app}_1`, "armed", attestSigner(e.grantor, e.user_id)), "started");
         Object.assign(e, {
           status: "ready",
           step: "done",
