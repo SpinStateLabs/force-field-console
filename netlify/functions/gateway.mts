@@ -15,6 +15,7 @@ import {
   isRedirectStatus,
   logRefusal,
   rawPathRefusal,
+  routeDecision,
   upstreamTarget,
   type RefusalCode,
 } from "../../src/lib/upstream";
@@ -99,6 +100,14 @@ export default async (req: Request, _context: Context): Promise<Response> => {
         "The sandbox estate is not attached yet. The console is live; the governance engine endpoint will be attached shortly.",
       );
     }
+  }
+
+  // --- Route allowlist (src/lib/upstream.ts ALLOWED_ROUTES): only the routes the console documents to customers are
+  // forwarded, and the cross-tenant ones only to a dedicated estate. Checked before the target is built and before the
+  // perimeter secret is attached; a refusal sends nothing upstream. ---
+  const decision = routeDecision(req.method, url.pathname.slice(GATEWAY_PREFIX.length), route.kind);
+  if (!decision.ok) {
+    return refuse(decision.reason, decision.status, decision.code, decision.message);
   }
 
   // --- Proxy. Strip the /api/v1 prefix; keep the query string. The target is built with the URL constructor against

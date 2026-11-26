@@ -33,7 +33,71 @@ export type RefusalCode =
   | "bad_estate_base"
   | "estate_url_mismatch"
   | "target_outside_base"
-  | "upstream_redirect";
+  | "upstream_redirect"
+  | "path_not_allowed"
+  | "method_not_allowed"
+  | "not_on_sandbox";
+
+/** Which estate a request is routed to: the customer's own dedicated estate, or the shared sandbox. */
+export type RouteKind = "estate" | "sandbox";
+
+/** A route the console forwards: method, a fully anchored pattern for the path after /api/v1, where it is promised. */
+export type AllowedRoute = {
+  method: "GET" | "POST";
+  pattern: RegExp;
+  /** Allowed on the shared sandbox too. False for a route that reads or writes across tenants on a shared estate. */
+  sandbox: boolean;
+  docs: string;
+};
+
+/** A delegation token id as the platform mints it: str(uuid.uuid4()) (field-platform field_core/delegation.py:33). */
+const TOKEN_ID = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+/** A FORCE preset name (force_gateway/presets.py:23: analysis, brainstorm, draft, audit). */
+const PRESET_NAME = "[a-z][a-z0-9_-]{0,31}";
+
+/**
+ * The only routes the gateway forwards, each from the console's own customer documentation. Anything else answers
+ * 404 before the perimeter secret is attached: the ops console's root API, kill-switch, governor, federation, replay,
+ * crosswalk, the ledger's write and admin routes, the registry's PATCH/attest/discover, every /health but the
+ * ledger's, and every operator route.
+ */
+export const ALLOWED_ROUTES: readonly AllowedRoute[] = [
+  { method: "POST", pattern: /^\/registry\/agents$/, sandbox: false, docs: "docs/estate-quickstart.md:37; public/setup-steps.js:148" },
+  { method: "GET", pattern: /^\/registry\/agents$/, sandbox: false, docs: "docs/estate-quickstart.md:108; public/setup-steps.js:300" },
+  { method: "POST", pattern: /^\/delegation\/tokens$/, sandbox: false, docs: "docs/estate-quickstart.md:51; public/setup-steps.js:176" },
+  { method: "POST", pattern: new RegExp("^/delegation/tokens/" + TOKEN_ID + "/revoke$"), sandbox: false, docs: "docs/estate-quickstart.md:59; public/setup-steps.js:171,181,184" },
+  { method: "POST", pattern: /^\/sentinel\/check$/, sandbox: true, docs: "docs/estate-quickstart.md:64; public/setup-steps.js:207; public/app.js:743; public/index.html:80" },
+  { method: "POST", pattern: /^\/gateway\/v1\/messages$/, sandbox: true, docs: "docs/estate-quickstart.md:78; public/setup-steps.js:236" },
+  { method: "GET", pattern: /^\/gateway\/presets$/, sandbox: true, docs: "docs/estate-quickstart.md:84 (x-force-preset selects a FORCE preset)" },
+  { method: "GET", pattern: new RegExp("^/gateway/presets/" + PRESET_NAME + "$"), sandbox: true, docs: "docs/estate-quickstart.md:84" },
+  { method: "GET", pattern: /^\/attest\/pack$/, sandbox: false, docs: "docs/estate-quickstart.md:90; public/setup-steps.js:264-265" },
+  { method: "GET", pattern: /^\/attest\/pack\.html$/, sandbox: false, docs: "docs/estate-quickstart.md:91; public/setup-steps.js:264-265" },
+  { method: "GET", pattern: /^\/ledger\/health$/, sandbox: true, docs: "docs/estate-quickstart.md:107; public/setup-steps.js:300" },
+  { method: "GET", pattern: /^\/lifecycle\/findings$/, sandbox: false, docs: "docs/estate-quickstart.md:109; public/setup-steps.js:300" },
+];
+
+export type RouteDecision = { ok: true } | { ok: false; reason: RefusalCode; status: number; code: string; message: string };
+
+/**
+ * Whether the gateway forwards `method` + `subPath` (the parsed path after /api/v1, query excluded) for a request
+ * routed to `kind`. A path no route matches is 404; a matched path with another method is 405; a route that is
+ * dedicated-only, asked on the shared sandbox, is 403.
+ */
+export function routeDecision(method: string, subPath: string, kind: RouteKind): RouteDecision {
+  const m = method.toUpperCase();
+  const matches = ALLOWED_ROUTES.filter((r) => r.pattern.test(subPath));
+  if (matches.length === 0) {
+    return { ok: false, reason: "path_not_allowed", status: 404, code: "not_found", message: "No such route on the console gateway." };
+  }
+  const route = matches.find((r) => r.method === m);
+  if (!route) {
+    return { ok: false, reason: "method_not_allowed", status: 405, code: "method_not_allowed", message: "That method is not accepted on this route." };
+  }
+  if (kind === "sandbox" && !route.sandbox) {
+    return { ok: false, reason: "not_on_sandbox", status: 403, code: "not_on_sandbox", message: "This route needs a dedicated estate; it is not available on the shared sandbox." };
+  }
+  return { ok: true };
+}
 
 /**
  * The reason the raw request path is refused, or null when it is acceptable. Decided on the raw string, never on a

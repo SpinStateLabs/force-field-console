@@ -139,7 +139,7 @@ describe("gateway handler: a refused request never reaches fetch", () => {
     const res2 = await handler(new Request("https://force-field-console.netlify.app/api/v1/%2e%2e/xx.other.example/p", { headers: { "x-api-key": key } }), ctx);
     expect(res2.status).toBe(400);
     const res3 = await handler(rawReq("https://force-field-console.netlify.app/api/v1//other.example/x", { "x-api-key": key }), ctx);
-    expect(res3.status).toBe(400);
+    expect(res3.status).toBe(404); // "//other.example/x" is no documented route: refused by the allowlist
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -150,11 +150,11 @@ describe("gateway handler: a refused request never reaches fetch", () => {
   });
 
   it("still forwards a normal sandbox request, path and query unchanged, with the secret", async () => {
-    const res = await handler(new Request("https://force-field-console.netlify.app/api/v1/registry/agents?status=active&owner=a@b.example", { headers: { "x-api-key": key } }), ctx);
+    const res = await handler(new Request("https://force-field-console.netlify.app/api/v1/ledger/health?status=active&owner=a@b.example", { headers: { "x-api-key": key } }), ctx);
     expect(res.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://sandbox.example/registry/agents?status=active&owner=a@b.example");
+    expect(url).toBe("https://sandbox.example/ledger/health?status=active&owner=a@b.example");
     expect(new Headers(init.headers).get("x-field-auth")).toBe("sandbox-secret");
   });
 

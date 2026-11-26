@@ -102,7 +102,7 @@ describe("gateway handler: hardening", () => {
   });
 
   it("sends with redirect: manual", async () => {
-    const res = await handler(new Request(SITE + "/api/v1/registry/agents", { headers: { "x-api-key": key } }), ctx);
+    const res = await handler(new Request(SITE + "/api/v1/ledger/health", { headers: { "x-api-key": key } }), ctx);
     expect(res.status).toBe(200);
     const init = (fetchMock.mock.calls[0] as [string, RequestInit])[1];
     expect(init.redirect).toBe("manual");
@@ -110,7 +110,7 @@ describe("gateway handler: hardening", () => {
 
   it.each([301, 302, 303, 307, 308, 300, 399])("maps an upstream %i to a fixed 502 with no Location and no upstream body", async (status) => {
     fetchMock.mockImplementation(async () => new Response("upstream body", { status, headers: { location: "https://other.example/x", "content-type": "text/plain" } }));
-    const res = await handler(new Request(SITE + "/api/v1/registry/agents", { method: "POST", headers: { "x-api-key": key, "content-type": "application/json" }, body: "{}" }), ctx);
+    const res = await handler(new Request(SITE + "/api/v1/sentinel/check", { method: "POST", headers: { "x-api-key": key, "content-type": "application/json" }, body: "{}" }), ctx);
     expect(res.status).toBe(502);
     expect(res.headers.get("location")).toBeNull();
     const body = await res.json();
@@ -122,14 +122,14 @@ describe("gateway handler: hardening", () => {
   it("maps an opaque redirect response to the same 502", async () => {
     const opaque = { status: 0, type: "opaqueredirect", headers: new Headers(), body: null, arrayBuffer: async () => new ArrayBuffer(0) };
     fetchMock.mockImplementation(async () => opaque as unknown as Response);
-    const res = await handler(new Request(SITE + "/api/v1/registry/agents", { headers: { "x-api-key": key } }), ctx);
+    const res = await handler(new Request(SITE + "/api/v1/ledger/health", { headers: { "x-api-key": key } }), ctx);
     expect(res.status).toBe(502);
     expect((await res.json()).error.code).toBe("upstream_redirect");
   });
 
   it("refuses an http sandbox base that is not loopback, before sending", async () => {
     process.env.ESTATE_URL = "http://sandbox.example";
-    const res = await handler(new Request(SITE + "/api/v1/registry/agents", { headers: { "x-api-key": key } }), ctx);
+    const res = await handler(new Request(SITE + "/api/v1/ledger/health", { headers: { "x-api-key": key } }), ctx);
     expect(res.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(JSON.stringify({ gateway_refusal: "target_outside_base" }));
@@ -150,7 +150,7 @@ describe("gateway handler: hardening", () => {
     expect(warn).toHaveBeenCalledWith(JSON.stringify({ gateway_refusal: "estate_url_mismatch" }));
     e.url = estateOrigin(e.app);
     await saveEstate(e);
-    const ok = await handler(new Request(SITE + "/api/v1/sentinel/check", { headers: { "x-api-key": key } }), ctx);
+    const ok = await handler(new Request(SITE + "/api/v1/sentinel/check", { method: "POST", headers: { "x-api-key": key, "content-type": "application/json" }, body: "{}" }), ctx);
     expect(ok.status).toBe(200);
     expect((fetchMock.mock.calls[0] as [string])[0]).toBe(`https://${e.app}.fly.dev/sentinel/check`);
   });
@@ -180,7 +180,7 @@ describe("gateway handler: hardening", () => {
   });
 
   it("a normal request logs nothing", async () => {
-    const res = await handler(new Request(SITE + "/api/v1/registry/agents?limit=5", { headers: { "x-api-key": key } }), ctx);
+    const res = await handler(new Request(SITE + "/api/v1/ledger/health?limit=5", { headers: { "x-api-key": key } }), ctx);
     expect(res.status).toBe(200);
     expect(warn).not.toHaveBeenCalled();
     expect(isRedirectStatus(200)).toBe(false);

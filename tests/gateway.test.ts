@@ -104,7 +104,7 @@ describe("gateway", () => {
     );
 
     const res = await handler(
-      new Request("http://portal.test/api/v1/registry/agents?limit=5", {
+      new Request("http://portal.test/api/v1/ledger/health?limit=5", {
         headers: {
           "x-api-key": plaintext,
           accept: "application/json",
@@ -128,7 +128,7 @@ describe("gateway", () => {
 
     expect(calls).toHaveLength(1);
     // /api/v1 stripped; search preserved.
-    expect(calls[0].url).toBe("https://estate.test/registry/agents?limit=5");
+    expect(calls[0].url).toBe("https://estate.test/ledger/health?limit=5");
     expect(calls[0].headers.get("x-field-auth")).toBe("shared-secret-test");
     expect(calls[0].headers.get("x-ff-tenant")).toBe(user.id);
     expect(calls[0].headers.get("x-field-agent-id")).toBe("invoice-bot");
@@ -158,7 +158,7 @@ describe("gateway", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date(Date.UTC(2026, 7, 1, 6, 0, 15)) });
 
     const mk = () =>
-      new Request("http://portal.test/api/v1/ledger/entries", {
+      new Request("http://portal.test/api/v1/ledger/health", {
         headers: { "x-api-key": plaintext },
       });
 
