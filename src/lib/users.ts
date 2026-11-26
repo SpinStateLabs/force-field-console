@@ -53,6 +53,30 @@ export class WeakPassword extends Error {}
 export class EmailTaken extends Error {}
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+/** RFC 5321 path limit. The email becomes the estate grantor, the owner-roster row and the attestation signer statement. */
+export const MAX_EMAIL_LENGTH = 254;
+/** Control (Cc: C0, DEL, C1) and format (Cf: zero-width, bidi overrides, BOM, ...) characters: never in an email we record. */
+const UNSAFE_EMAIL_CHARS = /[\p{Cc}\p{Cf}]/u;
+/**
+ * A lone (unpaired) surrogate. With the u flag, \p{Cs} matches only unpaired halves, never a valid pair such as an
+ * emoji. A lone surrogate is not valid Unicode: it hashes (via UTF-8) to the same replacement character as any other
+ * lone surrogate, so distinct strings would share one user key, and it cannot be written to the estate's roster files.
+ */
+const LONE_SURROGATE = /\p{Cs}/u;
+
+/**
+ * True when `email`, exactly as given, is acceptable for a new account (whitespace anywhere is refused, as before).
+ * The length bound applies to the value as given AND to the stored form (trimmed, lower-cased: see createUser), because
+ * lower-casing can lengthen a string (for example U+0130 becomes two code units).
+ */
+export function isAcceptableEmail(email: unknown): email is string {
+  if (typeof email !== "string") return false;
+  if (email.length === 0 || email.length > MAX_EMAIL_LENGTH) return false;
+  if (LONE_SURROGATE.test(email)) return false;
+  if (UNSAFE_EMAIL_CHARS.test(email)) return false;
+  if (email.trim().toLowerCase().length > MAX_EMAIL_LENGTH) return false;
+  return EMAIL_RE.test(email);
+}
 const MIN_PASSWORD_LENGTH = 10;
 
 /** Blob key for a user record: "users/" + sha256hex(normalized email). */
@@ -62,7 +86,7 @@ export function emailKey(email: string): string {
 }
 
 export async function createUser(email: string, password: string): Promise<User> {
-  if (!EMAIL_RE.test(email)) throw new BadEmail("Invalid email address.");
+  if (!isAcceptableEmail(email)) throw new BadEmail("Invalid email address.");
   if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
     throw new WeakPassword(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
   }
