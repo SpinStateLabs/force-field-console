@@ -11,5 +11,5 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["src", "netlify", "tests"]
+  "include": ["src", "netlify", "tests", "scripts"]
 }

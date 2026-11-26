@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { freshStore } from "./helpers";
+import { freshStore, payingFixture } from "./helpers";
 import { createUser, type User } from "../src/lib/users";
 import {
   BOOTSTRAP_PY,
@@ -144,6 +144,8 @@ describe("dedicated estates", () => {
     freshStore();
     Object.assign(process.env, FLY_ENV);
     user = await createUser("owner@example.com", "sufficiently-long-pass");
+    // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+    await payingFixture(user);
   });
 
   afterEach(() => {
@@ -318,7 +320,8 @@ describe("dedicated estates", () => {
     delete process.env.FLY_API_TOKEN;
     const e = await queueEstate(user);
     expect(e.status).toBe("pending_manual");
-    expect(resolveRoute(user, e)).toEqual({ kind: "sandbox" });
+    // an account with NO paid tier is the one routed to the shared sandbox (#29 r5: the fixture user is now paying)
+    expect(resolveRoute({ ...user, tier: "sandbox", billing: null } as any, e)).toEqual({ kind: "sandbox" });
     const idle = await advanceEstate(e, null, { fetchImpl: healthFetch({}) });
     expect(idle.outcome).toBe("idle");
     process.env.FLY_API_TOKEN = "fo1_test";
@@ -332,7 +335,7 @@ describe("dedicated estates", () => {
   it("routes provisioning and suspended estates to honest refusals", async () => {
     const e = await queueEstate(user);
     expect(resolveRoute(user, e)).toMatchObject({ kind: "refuse", status: 503, code: "estate_provisioning" });
-    expect(resolveRoute(user, null)).toEqual({ kind: "sandbox" });
+    expect(resolveRoute({ ...user, tier: "sandbox", billing: null } as any, null)).toEqual({ kind: "sandbox" });
     e.status = "suspended";
     expect(resolveRoute(user, e)).toMatchObject({ kind: "refuse", status: 403, code: "estate_suspended" });
   });

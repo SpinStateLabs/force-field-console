@@ -73,7 +73,10 @@ const PENDING = { reason: "subscription canceled", since: "2026-01-01T00:00:00.0
 
 let user: User;
 beforeEach(async () => {
-  freshStore();
+  // #29 r4 F1: the tick resumes/revives/retries only for an active subscription with its own paid invoice (mayRunEstate);
+  // these tests are about a customer whose sub_1 has paid (the unpaid case is below / in paid-estate-drivers).
+  const st = freshStore();
+  await st.setJSON("paid_subscriptions/sub_1", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   user = await createUser("a@example.com", "sufficiently-long-pass");
 });
@@ -139,6 +142,26 @@ describe("MED: the tick's suspend retry cannot override a reactivation", () => {
     const e = (await getEstate(user.id))!;
     expect(e.status).toBe("ready");
     expect(e.suspend_pending ?? null).toBeNull();
+  });
+
+  it("UNPAID (#29 r4): the same with sub_1 never paid: the tick does NOT revive it, the pending stop is retried", async () => {
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).delete("paid_subscriptions/sub_1");
+    await readyEstate(user, { suspend_pending: { ...PENDING } });
+    user.tier = "operator";
+    user.billing = { customer_id: "cus_1", subscription_id: "sub_1", status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" };
+    await saveUser(user);
+    const model = new ModelFly();
+    const api = machinesApiHandler(model);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init?: any) => (await api(String(url), init)) ?? new Response("", { status: 404 })) as any;
+    try {
+      const body = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
+      expect(body.outcomes.resume_retry_ok ?? 0).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(model.log).toContain("stop m_1");
   });
 
   it("mirror: a retry that FAILS after the flag was cleared does not revive it", async () => {

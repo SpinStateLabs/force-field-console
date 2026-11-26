@@ -189,8 +189,9 @@ export class World {
         // a paying customer on sub 1 with a provisioned, armed, running estate
         user.tier = "operator";
         user.billing = { customer_id: cust(u), subscription_id: subId(u, 1), status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: new Date(T0).toISOString() };
-        this.net.subs.set(subId(u, 1), { id: subId(u, 1), customer: cust(u), status: "active", price: "price_op", user_meta: id, created: Math.floor(T0 / 1000) - 86400 });
+        this.net.subs.set(subId(u, 1), { id: subId(u, 1), customer: cust(u), status: "active", price: "price_op", user_meta: id, created: Math.floor(T0 / 1000) - 86400, was_active: true });
         await this.store.inner.setJSON("stripe_customers/" + cust(u), { user_id: id });
+        await this.store.inner.setJSON("paid_subscriptions/" + subId(u, 1), { customer: cust(u), first_paid_invoice: "in_seed_" + id, at: new Date(T0).toISOString() }); // F2: sub 1 has paid
       }
       await this.store.inner.setJSON(emailKey(email), user);
       await this.store.inner.setJSON("uid/" + id, { email_key: emailKey(email) });
@@ -246,6 +247,13 @@ export class World {
   }
 
   // ------------------------------------------------------------------ Stripe side
+  /** Owner rule (#28, review #29 B2): the dedicated estate starts at the FIRST PAYMENT. A granting subscription that has
+   *  never been active (trialing, or past_due straight from a trial) grants the tier but no estate. */
+  private paidGranting(u: number): boolean {
+    for (const s of this.net.subs.values()) if (s.customer === cust(u) && GRANTING.has(s.status) && s.was_active && (s.price === "price_op" || s.price === "price_sov")) return true;
+    return false;
+  }
+
   private granting(u: number): boolean {
     for (const s of this.net.subs.values()) if (s.customer === cust(u) && GRANTING.has(s.status) && (s.price === "price_op" || s.price === "price_sov")) return true;
     return false;
@@ -282,17 +290,22 @@ export class World {
       const status: SubStatus = op.k === "newsub" ? op.status : "active";
       const price = "price" in op ? priceId(op.price) : "price_op";
       const meta = op.k === "newsub" ? op.meta : true;
-      const s: StripeSub = { id, customer: cust(u), status, price, user_meta: viaCheckout || meta ? userId(u) : null, created: Math.floor(clock.now / 1000) };
+      const s: StripeSub = { id, customer: cust(u), status, price, user_meta: viaCheckout || meta ? userId(u) : null, created: Math.floor(clock.now / 1000), was_active: status === "active" };
       this.net.subs.set(id, s);
       this.emit(u, "customer.subscription.created", this.subObject(s));
       if (viaCheckout && status !== "incomplete") {
         this.emit(u, "checkout.session.completed", { id: "cs_" + id, object: "checkout.session", mode: "subscription", subscription: id, customer: cust(u), client_reference_id: userId(u), metadata: { user_id: userId(u) } });
       }
+      // Stripe collects the first payment when a subscription starts active: a paid invoice with an amount (F2).
+      if (status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_0", object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: price }, amount: 2400 }] }, currency: "cad" });
     } else if (op.k === "status") {
       if (TERMINAL.has(existing.status) || existing.status === op.status) return;
       if (op.status === "incomplete") return; // only an initial status
       existing.status = op.status;
+      if (op.status === "active") existing.was_active = true;
       this.emit(u, op.status === "canceled" ? "customer.subscription.deleted" : "customer.subscription.updated", this.subObject(existing));
+      // Becoming active (trial converted, past_due recovered) means an invoice was paid (F2).
+      if (op.status === "active") this.emit(u, "invoice.paid", { id: "in_" + id + "_" + this.events.length, object: "invoice", customer: cust(u), subscription: id, amount_paid: 2400, lines: { data: [{ price: { id: existing.price }, amount: 2400 }] }, currency: "cad" });
     } else if (op.k === "plan") {
       if (TERMINAL.has(existing.status) || existing.price === priceId(op.price)) return;
       existing.price = priceId(op.price);
@@ -559,7 +572,11 @@ export class World {
       if (a && a.volumes.length > 1) this.violate("S2", "second-volume", state);
       if (G) {
         if (!usr || usr.tier === "sandbox") this.violate("S4", "paying-user-sandbox-tier", state);
-        if (!e) this.violate("L1", "paying-no-estate", state);
+        if (!this.paidGranting(u)) {
+          // Granting but never paid (trial, or a failed first payment): tier yes, estate not required, and never the
+          // shared sandbox (it has no tenant isolation).
+          if (usr && resolveRoute(usr, e).kind === "sandbox") this.violate("L1", "unpaid-grant-on-shared-sandbox", state);
+        } else if (!e) this.violate("L1", "paying-no-estate", state);
         else if (e.status === "error") this.violate("L4", "paying-estate-error:" + String(e.error ?? "").split(":")[0].slice(0, 40), state);
         else {
           if (e.status !== "ready" || e.suspend_pending || e.resume_pending) this.violate("L1", `paying-not-ready:${e.status}${e.suspend_pending ? "+sp" : ""}${e.resume_pending ? "+rp" : ""}`, state);

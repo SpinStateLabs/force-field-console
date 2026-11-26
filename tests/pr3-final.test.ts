@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import estateHandler from "../netlify/functions/estate.mts";
 import { FLY_LEAK_RE, ModelFly, flyErr } from "./model-fly";
-import { freshStore } from "./helpers";
+import { freshStore, payingFixture } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
 import { issueSession, sessionCookie } from "../src/lib/session";
 import { FlyError } from "../src/lib/fly";
@@ -66,6 +66,8 @@ beforeEach(async () => {
   Object.assign(process.env, FLY_ENV);
   readback.delayMs = 5;
   user = await createUser("fin@example.com", "sufficiently-long-pass");
+  // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+  await payingFixture(user);
   fly = new Pinned();
 });
 afterEach(() => {

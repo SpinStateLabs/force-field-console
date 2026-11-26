@@ -34,7 +34,10 @@ const fetchImpl = (async (u: any) => {
 const deps = () => ({ cfg: stripeConfig()!, fly: fly as any, fetchImpl });
 
 beforeEach(async () => {
-  freshStore();
+  // X2 (#29 r3): a suspended estate resumes only for a subscription with its own paid invoice; these tests are about
+  // the Fly resume mechanics once sub_A / sub_B have paid (the unpaid cases live in trial-estate-first-payment).
+  const st = freshStore();
+  for (const id of ["sub_A", "sub_B"]) await st.setJSON("paid_subscriptions/" + id, { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   readback.delayMs = 3;
   user = await createUser("rec@example.com", "sufficiently-long-pass");
@@ -79,6 +82,22 @@ async function tick() {
 }
 
 describe("MED a: a re-grant reconciles the real machine instead of clearing the flag", () => {
+  it("UNPAID (#29 r4 F6): the same with sub_B never paid: the pending stop is retried, the estate ends suspended, never running", async () => {
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).delete("paid_subscriptions/sub_B");
+    await payingOn("sub_A");
+    await readyEstate();
+    fly.waitNever = true;
+    statuses.sub_A = "canceled";
+    statuses.sub_B = "active";
+    await handleStripeEvent(ev("a_del", "customer.subscription.deleted", 200, sub("sub_A", "canceled")), deps());
+    fly.waitNever = false;
+    await handleStripeEvent(ev("b_new", "customer.subscription.created", 250, sub("sub_B", "active")), deps());
+    expect((await getEstate(user.id))!.resume_pending ?? null).toBeNull();
+    await retryPendingSuspend(user.id, fly as any, new Date());
+    expect(await final()).toMatchObject({ estate: "suspended", machine: "stopped", sub: "sub_B" });
+  });
+
   it("the wait times out after the stop (machine stopped, autostart off, flag pending); then B is created: the estate must be RUNNING", async () => {
     await payingOn("sub_A");
     await readyEstate();

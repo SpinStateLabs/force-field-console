@@ -11,7 +11,8 @@ const sub = (id: string, status: string) => ({ id, status, customer: "cus_1", it
 const ev = (id: string, type: string, created: number, s: any) => ({ id, type, created, livemode: true, data: { object: s } });
 const st: Record<string, string> = {};
 const fetchImpl = (async (u: any) => { const id = String(u).split("/").pop()!; return new Response(JSON.stringify(sub(id, st[id] ?? "canceled")), { status: 200 }); }) as any;
-beforeEach(async () => { freshStore(); Object.assign(process.env, ENV); readback.delayMs = 2; user = await createUser("st@example.com", "sufficiently-long-pass"); fly = new ModelFly(); });
+// #29 r4 F1: paying customers only here (every subscription has paid); unpaid cases live in paid-estate-drivers.
+beforeEach(async () => { const st = freshStore(); for (const id of ["sub_A", "sub_B"]) await st.setJSON("paid_subscriptions/" + id, { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" }); Object.assign(process.env, ENV); readback.delayMs = 2; user = await createUser("st@example.com", "sufficiently-long-pass"); fly = new ModelFly(); });
 afterEach(() => { readback.delayMs = orig; for (const k of Object.keys(ENV)) delete process.env[k]; });
 it("stale read in revive: cancel's stop wait times out (flag pending, machine really stopped), re-grant reads a pre-stop snapshot", async () => {
   user.tier = "operator"; user.billing = { customer_id: "cus_1", subscription_id: "sub_A", status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t" }; await saveUser(user);

@@ -40,7 +40,9 @@ describe("stripe webhook state transitions", () => {
   let user: User;
 
   beforeEach(async () => {
-    freshStore();
+    // F2 (#29): an estate starts only after the subscription's paid invoice; these tests are about what happens once
+    // sub_1 has paid (one UNPAID case below proves the paid check still bites in this file).
+    await freshStore().setJSON("paid_subscriptions/sub_1", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
     Object.assign(process.env, STRIPE_ENV);
     user = await createUser("pay@example.com", "sufficiently-long-pass");
   });
@@ -65,6 +67,18 @@ describe("stripe webhook state transitions", () => {
     const e = await getEstate(user.id);
     expect(e?.status).toBe("pending_manual"); // no Fly config in this test
     expect(e?.grantor).toBe("pay@example.com");
+  });
+
+  it("UNPAID: checkout of an active subscription with no paid invoice grants the tier but queues no estate", async () => {
+    const fetchImpl = async (url: string) =>
+      url.endsWith("/v1/subscriptions/sub_2") ? jsonResponse(200, sub({ id: "sub_2" })) : jsonResponse(404, { error: { message: "no" } });
+    const r = await handleStripeEvent(
+      { id: "evt_u", livemode: true, type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_2", customer: "cus_1", client_reference_id: user.id } } },
+      { cfg: stripeConfig()!, fly: null, fetchImpl },
+    );
+    expect(r.handled).toBe(true);
+    expect((await getUserById(user.id))!.tier).toBe("operator");
+    expect(await getEstate(user.id)).toBeNull();
   });
 
   it("ignores non-subscription checkouts and sessions without a portal user", async () => {

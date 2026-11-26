@@ -33,6 +33,14 @@ export function setStoreForTesting(s: KV | null): void {
 }
 
 /**
+ * Install the store an operator script runs against (scripts/backfill-paid-subscriptions.ts): the site's "portal" store
+ * opened outside the Netlify runtime. Same slot as the test store; never called by the deployed functions.
+ */
+export function installScriptStore(s: KV): void {
+  testStore = s;
+}
+
+/**
  * Read an environment variable. Prefers the Netlify runtime global
  * (Netlify.env.get) and falls back to process.env so tests and plain
  * Node tooling work unchanged.
@@ -82,6 +90,11 @@ export async function portalStore(): Promise<KV> {
     storeScope() === "site"
       ? getStore({ name: "portal", consistency: "strong" })
       : getDeployStore({ name: "portal", consistency: "strong" });
+  return kvFromBlobStore(store);
+}
+
+/** The KV adapter over a @netlify/blobs store (the deployed functions, and the operator script's opened store). */
+export function kvFromBlobStore(store: any): KV {
   return {
     get: (key, opts) => store.get(key, opts as any),
     setJSON: async (key, value) => {

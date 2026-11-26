@@ -16,9 +16,14 @@
   if (!flags || flags.ok !== true) return;
   var billing = flags.billing_configured === true;
   var prov = flags.provisioning_configured === true;
-  if (billing && prov) {
+  var testOnly = flags.stripe_mode === "test" && flags.test_mode_provisioning !== true;
+  if (billing && testOnly) {
     note.textContent =
-      "Checkout runs through Stripe. After checkout a dedicated estate is provisioned automatically on Fly.io " +
+      "Honest note: checkout on this deployment runs in Stripe test mode. No card is charged, and no dedicated estate " +
+      "is started from a test payment. Install Force-Field from GitHub to run it yourself today.";
+  } else if (billing && prov) {
+    note.textContent =
+      "Checkout runs through Stripe. Paid plans start with a 30-day trial; at your first payment a dedicated estate is provisioned automatically on Fly.io " +
       "(typically a few minutes; the dashboard shows every step) and armed in the same posture as the public sandbox: per-event ledger signing required, " +
       "signed attestations, gateway enforcement with tool checks, and a delegation roster you control. " +
       "You bring your own Anthropic API key for model calls.";
@@ -28,8 +33,8 @@
       "paid accounts get their dedicated estate by hand from Spin State Labs and the dashboard shows it as pending until then.";
   } else {
     note.textContent =
-      "Honest note: paid checkout is not enabled on this deployment yet, and dedicated estates are provisioned manually. " +
-      "Register on Sandbox and we will follow up — no instant paid activation is promised.";
+      "Honest note: paid plans are not on sale on this deployment yet. Install Force-Field from GitHub to run it " +
+      "yourself today, or contact us — no instant paid activation is promised.";
   }
   var ctas = document.querySelectorAll("[data-upgrade]");
   for (var i = 0; i < ctas.length; i++) {

@@ -21,6 +21,7 @@ import {
 } from "../../src/lib/estates";
 import { kickWorker } from "../../src/lib/worker";
 import { releaseSuspendedEstate } from "../../src/lib/release";
+import { mayRunEstate } from "../../src/lib/paid";
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -29,6 +30,11 @@ function json(status: number, body: unknown): Response {
 function err(status: number, code: string, message: string): Response {
   return json(status, { error: { code, message } });
 }
+
+// Review #29 r5 B1: provisioning (advance, retry) only for an active subscription with its own paid invoice; anything else
+// is refused with one fixed code and no Fly call (advanceEstate parks it too, for every other driver). Checked after the
+// configuration check, so an unconfigured deployment still answers 501 first.
+const PARKED = (): Response => err(409, "estate_parked", "Provisioning waits for an active subscription with a paid invoice.");
 
 const NOT_CONFIGURED = "Dedicated-estate provisioning is not configured on this deployment; paid estates are provisioned by hand until it is.";
 
@@ -58,12 +64,14 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       // library / background function directly and never this endpoint.)
       const fly = flyClientOrNull();
       if (!fly) return err(501, "provisioning_not_configured", NOT_CONFIGURED);
+      if (!(await mayRunEstate(user))) return PARKED();
       const r = await advanceEstate(estate, fly);
       return json(200, { outcome: r.outcome, note: r.note, estate: publicEstate(r.estate) });
     }
 
     if (req.method === "POST" && pathname === "/api/estate/retry") {
       if (!configured) return err(501, "provisioning_not_configured", NOT_CONFIGURED);
+      if (!(await mayRunEstate(user))) return PARKED();
       await retryEstate(estate);
       // The background worker does the slow work; fall back to one synchronous step when it cannot be kicked.
       if (await kickWorker(user.id, "advance")) {

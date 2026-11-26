@@ -194,6 +194,12 @@ function renderBilling(me) {
     summary += " Subscription " + b.status + ".";
     if (b.current_period_end) summary += " Current period ends " + fmtTime(b.current_period_end) + ".";
   }
+  // Trial (owner decision 2026-11-22): no hosted estate until the first payment; the trial runs on the open-source install.
+  if (me.trial) {
+    summary += " Trial: " + (me.trial.days_left === null ? "" : me.trial.days_left + " days left. ") +
+      "Your hosted dedicated estate starts with the first payment. Until then, run Force-Field from the open-source install: " +
+      me.trial.install_url;
+  }
   $("billing-summary").textContent = summary;
 
   const configured = flags ? flags.billing_configured === true : null;
@@ -217,7 +223,7 @@ function renderBilling(me) {
   } else {
     show(upOp);
     show(upSov);
-    upSov.textContent = "Upgrade to Estate ($249/mo)";
+    upSov.textContent = "Upgrade to Estate (CA$24/seat/mo, min 3 seats)";
   }
   if (b && b.has_customer) show(manage); else hide(manage);
 }
@@ -225,7 +231,11 @@ function renderBilling(me) {
 async function startCheckout(tier, btn) {
   btn.disabled = true;
   setError($("billing-error"), "");
-  const res = await api("/api/billing/checkout", { method: "POST", body: { tier } });
+  // The server enforces the plan's seat bounds (400 bad_seats with the allowed range, shown below).
+  const res = await api("/api/billing/checkout", {
+    method: "POST",
+    body: { tier, seats: Number($("seat-count").value), interval: $("annual-billing").checked ? "year" : "month" },
+  });
   if (res.status === 200 && res.data && typeof res.data.url === "string") {
     window.location.assign(res.data.url);
     return;
@@ -245,6 +255,20 @@ async function openBillingPortal() {
     return;
   }
   btn.disabled = false;
+  setError($("billing-error"), errMessage(res.status, res.data));
+}
+
+// Top-up packs: the server checks the count and that the subscription is active and paid (not in the trial).
+async function updatePacks() {
+  const btn = $("update-packs");
+  btn.disabled = true;
+  setError($("billing-error"), "");
+  const res = await api("/api/billing/packs", { method: "POST", body: { packs: Number($("pack-count").value) } });
+  btn.disabled = false;
+  if (res.status === 200) {
+    window.location.reload(); // the webhook records the new pack count; the summary reloads from /api/me
+    return;
+  }
   setError($("billing-error"), errMessage(res.status, res.data));
 }
 
@@ -761,6 +785,7 @@ $("key-modal-close").addEventListener("click", closeKeyModal);
 $("upgrade-operator").addEventListener("click", (ev) => startCheckout("operator", ev.currentTarget));
 $("upgrade-sovereign").addEventListener("click", (ev) => startCheckout("sovereign", ev.currentTarget));
 $("manage-billing").addEventListener("click", openBillingPortal);
+$("update-packs").addEventListener("click", updatePacks);
 $("estate-retry").addEventListener("click", retryEstate);
 $("estate-release-btn").addEventListener("click", askReleaseEstate);
 $("estate-release-no").addEventListener("click", cancelReleaseEstate);

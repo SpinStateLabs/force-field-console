@@ -45,7 +45,10 @@ let errors: string[];
 let spy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(async () => {
-  freshStore();
+  // #29 r4 F1: the tick resumes/revives/retries only for an active subscription with its own paid invoice (mayRunEstate);
+  // these tests are about a customer whose sub_1 has paid (the unpaid case is below / in paid-estate-drivers).
+  const st = freshStore();
+  await st.setJSON("paid_subscriptions/sub_1", { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV);
   user = await createUser("h123@example.com", "sufficiently-long-pass");
   errors = [];
@@ -254,6 +257,22 @@ describe("H2: provisioning that exhausts its attempts is alerted, flagged and re
       // a second tick does not retry again (it is provisioning now, not error)
       const again = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
       expect(again.outcomes.provision_auto_retry ?? 0).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("UNPAID (#29 r4): the same errored estate on a sub_1 that never paid is neither counted nor auto-retried", async () => {
+    await exhaust(failingFly(), new Date(Date.now() - 10 * 3_600_000));
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).delete("paid_subscriptions/sub_1");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("boom", { status: 500 })) as any;
+    try {
+      const body = await (await tickHandler(new Request("http://portal.test/tick", { method: "POST", body: "{}" }))).json();
+      expect(body.provision_failed).toBe(0);
+      expect(body.outcomes.provision_auto_retry ?? 0).toBe(0);
+      expect((await getEstate(user.id))!.status).toBe("error");
     } finally {
       globalThis.fetch = realFetch;
     }

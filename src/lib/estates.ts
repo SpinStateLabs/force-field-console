@@ -18,7 +18,9 @@
 import { createHash, createHmac } from "node:crypto";
 import { env, portalStore } from "./store";
 import type { User } from "./users";
+import { trialInfo } from "./trial";
 import { withUserLock } from "./locks";
+import { PARKED_NOTE, mayRunEstateFor } from "./paid";
 import { FlyError, estateMachineConfig, estateOrigin, flyConfig, withAutostart, type FetchLike, type FlyClient, type MachineConfig } from "./fly";
 
 export type EstateStatus = "pending_manual" | "provisioning" | "ready" | "suspended" | "error";
@@ -86,6 +88,9 @@ export type Estate = {
   anthropic_key_set_at: string | null;
   /** The engine image the machine runs (recorded at launch/upgrade; null on records older than this field). */
   image: string | null;
+  /** r6 C2: an image upgrade that could not START the stopped machine of an owner who may not run an estate; the tick
+   *  looks at it again after UPGRADE_DEFER_MS (never blocking the rollout of other estates meanwhile). */
+  upgrade_deferred?: { image: string; at: string } | null;
   health: EstateHealth | null;
   /** An image that failed to reach the armed posture on this estate; the tick will not retry it. */
   upgrade_failed_image: string | null;
@@ -561,6 +566,12 @@ export async function advanceEstate(
   if (e.test_hold) {
     return { estate: e, outcome: "idle", note: "held: queued by a Stripe test-mode grant; a live-mode grant releases it" };
   }
+  // Review #29 r5 B1: THE choke point of every provisioning driver (POST /api/estate/advance and /retry, the background
+  // worker, the tick's pending list). A record whose owner may not run an estate (mayRunEstate: active AND this
+  // subscription paid) is parked: no Fly call, no state change, one fixed note.
+  if ((e.status === "provisioning" || e.status === "pending_manual") && !(await mayRunEstateFor(e.user_id))) {
+    return { estate: e, outcome: "idle", note: PARKED_NOTE };
+  }
   if (e.status === "pending_manual" && fly && cfg) {
     e.status = "provisioning";
     logEstate(e, "queue", "provisioning became configured; starting", now);
@@ -690,7 +701,14 @@ export async function advanceEstate(
         break;
       }
       case "arm": {
-        await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", signer));
+        const { launched } = await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", signer));
+        if (!launched) {
+          // r7 F3: the owner stopped qualifying while this step ran; the armed config is staged (skip_launch). The step stays
+          // at arm (the provisioning gate parks the record) and is re-run, with a launch, once the owner qualifies again.
+          logEstate(e, "arm", "armed config staged on the stopped machine (not started: the subscription may not run an estate); re-run when it may", now);
+          await saveEstate(e, now);
+          return { estate: e, outcome: "idle", note: PARKED_NOTE };
+        }
         e.posture = { enforce: true, tool_check: true, require_signing: true, attest_signing: true };
         nextStep(e, "machine updated to the armed posture (signing required, attest signing, gateway enforce + tool check); restarting", now);
         break;
@@ -1239,15 +1257,17 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
  * estate INSIDE it and refuses when it is suspended or has a suspension pending, so a stale config
  * (autostart on) can never land after a completed suspend. With `readCurrent` the machine's current
  * config is read inside the lock too (never a copy read earlier). Updating a running machine restarts
- * it, which is the intent here (secrets / image / posture take effect); skip_launch is only for the
- * suspend / resume paths.
+ * it, which is the intent here (secrets / image / posture take effect).
+ * Review #29 r6 C2: a STOPPED machine is started by such a write only when the owner may run an estate (mayRunEstate:
+ * active AND this subscription paid). Otherwise the write is staged with skip_launch and takes effect at the next
+ * permitted start; the result says whether the machine was launched.
  */
 export async function updateMachineGuarded(
   e: Estate,
   fly: FlyClient,
   build: (current: MachineConfig | null) => MachineConfig,
   opts: { readCurrent?: boolean } = {},
-): Promise<void> {
+): Promise<{ launched: boolean }> {
   const run = async () => {
     const fresh = await getEstate(e.user_id);
     if (!fresh || fresh.status === "suspended" || fresh.suspend_pending) {
@@ -1256,18 +1276,36 @@ export async function updateMachineGuarded(
     const id = fresh.machine_id ?? e.machine_id;
     if (!id) throw new EstateError(409, "estate_not_ready", "The estate has no machine.");
     let current: MachineConfig | null = null;
+    let machine: { state?: string } | null = null;
     if (opts.readCurrent) {
-      current = (await fly.getMachine(e.app, id))?.config ?? null;
+      machine = await fly.getMachine(e.app, id);
+      current = (machine as any)?.config ?? null;
       if (!current) throw new EstateError(502, "machine_missing", "The estate machine could not be read.");
+    }
+    // C2: only an owner who may run an estate gets a stopped machine started by this write.
+    let skipLaunch = false;
+    if (!(await mayRunEstateFor(e.user_id))) {
+      if (!machine) machine = await fly.getMachine(e.app, id);
+      skipLaunch = !machineRunning(machine);
     }
     const config = build(current);
     // Persisted BEFORE the slow call: if it times out or this function is killed, Fly may still apply the
     // update after the lock is gone, even after a suspension (CX2); the mark makes the tick re-verify.
     await (await portalStore()).setJSON(configWriteKey(e.user_id), { at: new Date().toISOString() });
-    await fly.updateMachine(e.app, id, config);
+    if (skipLaunch) await fly.updateMachine(e.app, id, config, { skipLaunch: true });
+    else await fly.updateMachine(e.app, id, config);
+    return { launched: !skipLaunch };
   };
   return withUserLock(e.user_id, run);
 }
+
+/** A machine Fly reports as running (or already starting): a config write restarts it rather than starting it. */
+function machineRunning(m: { state?: string } | null): boolean {
+  return m?.state === "started" || m?.state === "starting";
+}
+
+/** How long a deferred image upgrade waits before the tick considers that estate again (r6 C2). */
+export const UPGRADE_DEFER_MS = 60 * 60_000;
 
 /**
  * Machine-config writes that may still be applied by Fly (one record per user: the start of the latest
@@ -1335,9 +1373,16 @@ export async function setEstateAnthropicKey(e: Estate, fly: FlyClient, key: stri
   if (e.status !== "ready") throw new EstateError(409, "estate_not_ready", "The estate must be ready before a key can be placed.");
   const k = validateAnthropicKey(key);
   await fly.setSecrets(e.app, { ANTHROPIC_API_KEY: k });
-  await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
+  const { launched } = await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
   e.anthropic_key_set_at = now.toISOString();
-  logEstate(e, "anthropic_key", "ANTHROPIC_API_KEY set on the estate; machine restarted to apply", now);
+  logEstate(
+    e,
+    "anthropic_key",
+    launched
+      ? "ANTHROPIC_API_KEY set on the estate; machine restarted to apply"
+      : "ANTHROPIC_API_KEY set on the estate; the machine is stopped: it stays stopped until our next permitted start or until Fly autostart wakes it on traffic, and the key applies then",
+    now,
+  );
   await saveEstate(e, now);
   return e;
 }
@@ -1412,7 +1457,7 @@ export function markEstateAppMissing(e: Estate, now: Date = new Date()): void {
   e.health = { ok: false, checked_at: now.toISOString(), note: "Fly app missing" };
 }
 
-export type HealthOutcome = "ok" | "unhealthy" | "app_missing" | "skipped";
+export type HealthOutcome = "ok" | "unhealthy" | "app_missing" | "skipped" | "stopped_owner_ineligible";
 
 /**
  * One health look at a ready estate (the scheduled tick's job): the app must
@@ -1434,8 +1479,16 @@ export async function checkEstateHealth(
     await saveEstate(e, now);
     return "app_missing";
   }
+  // r7 F1: our probe goes through the Fly proxy, and autostart would wake a STOPPED machine. For an owner who may not run
+  // an estate (mayRunEstate) the probe is not sent while the machine is not running: nothing is written, the outcome says
+  // why. (The customer's own traffic may still wake it through autostart: the accepted dunning window.)
+  let machine: Awaited<ReturnType<FlyClient["getMachine"]>> | null = null;
+  if (e.machine_id && !(await mayRunEstateFor(e.user_id))) {
+    machine = await fly.getMachine(e.app, e.machine_id, 8000);
+    if (!machineRunning(machine)) return "stopped_owner_ineligible";
+  }
   if (!e.image && e.machine_id) {
-    const m = await fly.getMachine(e.app, e.machine_id, 8000);
+    const m = machine ?? (await fly.getMachine(e.app, e.machine_id, 8000));
     if (m?.config?.image) e.image = m.config.image;
   }
   const led = await healthJson(e.url ?? estateOrigin(e.app), "/ledger/health", fetchImpl);
@@ -1475,10 +1528,29 @@ export async function upgradeEstateImage(
   if (e.status !== "ready" || !e.machine_id || !e.volume_id) throw new EstateError(409, "estate_not_ready", "Only a ready estate can change image.");
   const target = cfg.image;
   if (!opts.force && e.image === target) return { estate: e, outcome: "unchanged" };
+  // r6 C2: an upgrade restarts the machine. For an owner who may not run an estate, a STOPPED machine is left alone:
+  // no write (updateMachineGuarded would only stage it) and no 5-minute posture poll that would mark the rollout as
+  // failed; the estate is deferred and looked at again after UPGRADE_DEFER_MS. (Checked again inside the lock.)
+  if (!(await mayRunEstateFor(e.user_id)) && !machineRunning(await fly.getMachine(e.app, e.machine_id))) {
+    const already = e.upgrade_deferred?.image === target;
+    e.upgrade_deferred = { image: target, at: now.toISOString() };
+    if (!already) logEstate(e, "upgrade", `image ${target} not applied: the machine is stopped and the subscription may not start it; retried after the next start`, now);
+    await saveEstate(e, now);
+    return { estate: e, outcome: "unchanged" };
+  }
   const from = e.image ?? "unknown";
   logEstate(e, "upgrade", `updating the machine image ${from} -> ${target}${opts.force ? " (forced re-apply)" : ""}; armed posture re-verified afterwards`, now);
   await saveEstate(e, now);
-  await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor)));
+  const { launched } = await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor)));
+  if (!launched) {
+    // r7 F3: the check inside the lock staged the update (the machine stopped, or the owner stopped qualifying, after the
+    // pre-check). Not a failed rollout: no posture poll (it would wake the machine through autostart and then halt the
+    // fleet rollout on upgrade_failed_image); deferred like the pre-check case.
+    e.upgrade_deferred = { image: target, at: now.toISOString() };
+    logEstate(e, "upgrade", `image ${target} staged on the stopped machine, not started (the subscription may not start it); retried after the next start`, now);
+    await saveEstate(e, now);
+    return { estate: e, outcome: "unchanged" };
+  }
 
   const origin = e.url ?? estateOrigin(e.app);
   const polls = opts.polls ?? 60;
@@ -1502,6 +1574,7 @@ export async function upgradeEstateImage(
       const at = new Date();
       e.image = target;
       e.upgrade_failed_image = null;
+      e.upgrade_deferred = null;
       e.health = { ok: true, checked_at: at.toISOString(), note: `armed on ${target}` };
       logEstate(e, "upgrade", `armed and healthy on ${target} (ledger build ${p.ledger?.build_sha ?? "?"})`, at);
       await saveEstate(e, at);
@@ -1517,17 +1590,52 @@ export async function upgradeEstateImage(
 export type Route =
   | { kind: "sandbox" }
   | { kind: "estate"; url: string; secret: string }
-  | { kind: "refuse"; status: number; code: string; message: string };
+  | { kind: "refuse"; status: number; code: string; message: string; extra?: Record<string, unknown> };
 
-export function resolveRoute(user: User, estate: Estate | null): Route {
-  if (!estate || estate.status === "pending_manual") return { kind: "sandbox" };
-  if (estate.status === "ready" && estate.url && !estate.suspend_pending) return { kind: "estate", url: estate.url, secret: estateSecret(estate.app) };
-  if (estate.status === "suspended" || estate.suspend_pending) {
+/**
+ * ONE rule (owner decision 2026-11-22 + controller safety condition): only an account with NO paid tier may reach the
+ * shared sandbox, which has no account-level tenant isolation. A paid (or trialing) account gets its own READY estate or
+ * a refusal, in every other state: trialing (403 trial_no_estate: the trial runs on the open-source install), no record
+ * yet, pending_manual, a Stripe test-mode hold (503 estate_not_ready with a fixed reason), provisioning, suspended, error.
+ */
+export function resolveRoute(user: User, estate: Estate | null, now: Date = new Date()): Route {
+  if (estate && estate.status === "ready" && estate.url && !estate.suspend_pending) return { kind: "estate", url: estate.url, secret: estateSecret(estate.app) };
+  if (estate && (estate.status === "suspended" || estate.suspend_pending)) {
     return { kind: "refuse", status: 403, code: "estate_suspended", message: "Your dedicated estate is suspended (subscription not active). Its data is kept; reactivate billing to resume." };
   }
-  if (estate.status === "error") {
+  if (estate && estate.status === "error") {
     return { kind: "refuse", status: 503, code: "estate_error", message: "Your dedicated estate failed to provision; retry from the dashboard or contact Spin State Labs." };
   }
+  if (user.tier !== "sandbox") {
+    const trial = trialInfo(user, now);
+    if (trial) {
+      return {
+        kind: "refuse",
+        status: 403,
+        code: "trial_no_estate",
+        message: "Your trial runs on the open-source install; your hosted dedicated estate starts with the first payment.",
+        extra: { install_url: trial.install_url, days_left: trial.days_left, trial_ends_at: trial.ends_at },
+      };
+    }
+    if (!estate || estate.status === "pending_manual") {
+      const reason = !estate
+        ? user.billing?.first_payment_pending
+          ? "awaiting_first_payment" // F2: active, nothing paid yet (zero-amount invoice, 100% coupon)
+          : "not_queued"
+        : estate.test_hold
+          ? "test_hold"
+          : "pending_manual";
+      return {
+        kind: "refuse",
+        status: 503,
+        code: "estate_not_ready",
+        message: "Your dedicated estate is not ready yet; requests are never sent to the shared sandbox for a paid account.",
+        extra: { reason },
+      };
+    }
+    return { kind: "refuse", status: 503, code: "estate_provisioning", message: `Your dedicated estate is being provisioned (step ${estate.step}); try again in a few minutes.` };
+  }
+  if (!estate || estate.status === "pending_manual") return { kind: "sandbox" };
   return { kind: "refuse", status: 503, code: "estate_provisioning", message: `Your dedicated estate is being provisioned (step ${estate.step}); try again in a few minutes.` };
 }
 

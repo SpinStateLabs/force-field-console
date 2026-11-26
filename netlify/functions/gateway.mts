@@ -9,6 +9,14 @@ import { lookupKey } from "../../src/lib/keys";
 import { checkRateLimit } from "../../src/lib/ratelimit";
 import { getEstate, newAppName, resolveRoute } from "../../src/lib/estates";
 import { estateOrigin } from "../../src/lib/fly";
+import { agentsInUse, canonicalPath, classify, poolFor } from "../../src/lib/agentpool";
+import { LockBusyError, withAgentPoolLock } from "../../src/lib/locks";
+
+class UpstreamReadError extends Error {
+  constructor(public status: number) {
+    super("upstream " + status);
+  }
+}
 import {
   FORWARDED_CALLER_HEADERS,
   GATEWAY_PREFIX,
@@ -77,6 +85,12 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   const estate = await getEstate(user.id);
   const route = resolveRoute(user, estate);
   if (route.kind === "refuse") {
+    if (route.extra) {
+      return new Response(JSON.stringify({ error: { code: route.code, message: route.message, ...route.extra } }), {
+        status: route.status,
+        headers: { "content-type": "application/json" },
+      });
+    }
     return err(route.status, route.code, route.message);
   }
   let estateUrl: string | undefined;
@@ -145,36 +159,108 @@ export default async (req: Request, _context: Context): Promise<Response> => {
     body = await req.arrayBuffer();
   }
 
-  let upstream: Response;
-  try {
-    // redirect: "manual": a redirect from the estate is never followed (a followed cross-origin redirect would carry
-    // the perimeter secret, the tenant header, the caller's token and, on 307/308, the body to another host).
-    upstream = await fetch(target, {
-      method: req.method,
-      headers,
-      body,
-      redirect: "manual",
-      signal: AbortSignal.timeout(30000),
-    });
-  } catch (e: any) {
-    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-      return err(504, "upstream_timeout", "The engine estate did not respond within 30 seconds.");
+  const forward = async (): Promise<Response> => {
+    let upstream: Response;
+    try {
+      // redirect: "manual": a redirect from the estate is never followed (a followed cross-origin redirect would carry
+      // the perimeter secret, the tenant header, the caller's token and, on 307/308, the body to another host).
+      upstream = await fetch(target, {
+        method: req.method,
+        headers,
+        body,
+        redirect: "manual",
+        signal: AbortSignal.timeout(30000),
+      });
+    } catch (e: any) {
+      if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+        return err(504, "upstream_timeout", "The engine estate did not respond within 30 seconds.");
+      }
+      return err(502, "upstream_unreachable", "Could not reach the engine estate.");
     }
-    return err(502, "upstream_unreachable", "Could not reach the engine estate.");
-  }
-  // Any 3xx from the estate (or an opaque redirect, status 0) becomes a fixed 502: no Location, no upstream body.
-  if (isRedirectStatus(upstream.status) || upstream.type === "opaqueredirect") {
-    await upstream.body?.cancel().catch(() => undefined);
-    return refuse("upstream_redirect", 502, "upstream_redirect", "The engine estate answered with a redirect; it was not followed.");
-  }
+    // Any 3xx from the estate (or an opaque redirect, status 0) becomes a fixed 502: no Location, no upstream body.
+    if (isRedirectStatus(upstream.status) || upstream.type === "opaqueredirect") {
+      await upstream.body?.cancel().catch(() => undefined);
+      return refuse("upstream_redirect", 502, "upstream_redirect", "The engine estate answered with a redirect; it was not followed.");
+    }
 
-  // Buffer and return the upstream status, body, and content-type verbatim.
-  // No streaming in v0.
-  const upstreamBody = await upstream.arrayBuffer();
-  const responseHeaders: Record<string, string> = {};
-  const upstreamContentType = upstream.headers.get("content-type");
-  if (upstreamContentType) responseHeaders["content-type"] = upstreamContentType;
-  return new Response(upstreamBody, { status: upstream.status, headers: responseHeaders });
+    // Buffer and return the upstream status, body, and content-type verbatim.
+    // No streaming in v0.
+    const upstreamBody = await upstream.arrayBuffer();
+    const responseHeaders: Record<string, string> = {};
+    const upstreamContentType = upstream.headers.get("content-type");
+    if (upstreamContentType) responseHeaders["content-type"] = upstreamContentType;
+    return new Response(upstreamBody, { status: upstream.status, headers: responseHeaders });
+  };
+
+  // --- Agent pool (price book): gate what can add an agent on a dedicated estate. It runs only after the route
+  // allowlist has accepted the request and the target has been derived above, so it only ever sees an allowed method
+  // and path. A path that cannot be decoded is refused rather than guessed at. ---
+  const canon = canonicalPath(url.pathname.slice(GATEWAY_PREFIX.length));
+  if (canon === null) {
+    return err(400, "bad_path", "The request path could not be decoded.");
+  }
+  const pool = route.kind === "estate" ? poolFor(user) : null;
+  const gate = pool === null ? null : classify(method, canon, body);
+  if (pool === null || gate === null) return forward();
+
+  // The gate's own reads go to the same estate, built the same way as the forwarded target (URL constructor against
+  // the estate base, origin and path checked), never by string concatenation, and never follow a redirect.
+  const readUpstream = async (path: string): Promise<unknown> => {
+    const readUrl = upstreamTarget(GATEWAY_PREFIX + path, "", estateUrl!);
+    if (!readUrl) throw new UpstreamReadError(0);
+    const h = new Headers();
+    h.set("accept", "application/json");
+    if (sharedSecret) h.set("x-field-auth", sharedSecret);
+    h.set("x-ff-tenant", user.id);
+    const r = await fetch(readUrl.toString(), { method: "GET", headers: h, redirect: "manual", signal: AbortSignal.timeout(15000) });
+    if (!r.ok) throw new UpstreamReadError(r.status);
+    return r.json();
+  };
+
+  try {
+    return await withAgentPoolLock(user.id, async () => {
+      if (gate.kind === "maybe_revive") {
+        let current: any;
+        try {
+          current = await readUpstream("/registry/agents/" + encodeURIComponent(gate.agent_id));
+        } catch (e) {
+          // 404: no such agent, the upstream answers the PATCH itself and nothing can be revived. Any other failure is
+          // fail closed: the PATCH might revive a retired agent past the pool.
+          if (e instanceof UpstreamReadError && e.status === 404) return forward();
+          return err(503, "agent_count_unavailable", "The agent's current status could not be read; nothing was changed. Retry shortly.");
+        }
+        if (String(current?.status ?? "").toLowerCase() !== "retired") return forward(); // not a revival
+      }
+      let inUse: number | null = null;
+      try {
+        inUse = agentsInUse(await readUpstream("/registry/agents"));
+      } catch {
+        inUse = null;
+      }
+      if (inUse === null) {
+        return err(503, "agent_count_unavailable", "The estate's agent count could not be read; nothing was registered. Retry shortly.");
+      }
+      if (inUse >= pool) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: "agent_pool_full",
+              message: `Your plan allows ${pool} governed agents and ${inUse} are in use. Retire an agent, add seats, or add a top-up pack.`,
+              agent_pool: pool,
+              in_use: inUse,
+            },
+          }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      }
+      return forward();
+    });
+  } catch (e) {
+    if (e instanceof LockBusyError) {
+      return err(409, "agent_pool_busy", "Another agent change for this account is in progress; retry in a moment.", { "retry-after": "2" });
+    }
+    throw e;
+  }
 };
 
 export const config: Config = {

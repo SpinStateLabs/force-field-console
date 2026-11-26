@@ -26,7 +26,10 @@ const ev = (id: string, type: string, created: number, s: any) => ({ id, type, c
 const deps = () => ({ cfg: stripeConfig()!, fly: fly as any });
 
 beforeEach(async () => {
-  freshStore();
+  // X2 (#29 r3): a suspended estate resumes only for a subscription with its own paid invoice; these tests are about
+  // the Fly resume mechanics once sub_A / sub_B have paid (the unpaid cases live in trial-estate-first-payment).
+  const st = freshStore();
+  for (const id of ["sub_A", "sub_B"]) await st.setJSON("paid_subscriptions/" + id, { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   readback.delayMs = 3;
   user = await createUser("defer@example.com", "sufficiently-long-pass");
@@ -84,6 +87,19 @@ describe("DESIGN: the webhook queues a resume and returns; the tick starts the m
     expect(body.outcomes.resume_retry_ok).toBe(1);
     expect((await getEstate(user.id))!.status).toBe("ready");
     expect(fly.machine("m_1").state).toBe("started");
+  });
+
+  it("UNPAID (#29 r4 F6): the same re-grant on a subscription with no paid invoice queues nothing and the tick starts nothing", async () => {
+    const { portalStore } = await import("../src/lib/store");
+    await (await portalStore()).delete("paid_subscriptions/sub_A");
+    await payingOn("sub_A", "canceled");
+    await estate({ status: "suspended", suspended_from: "ready", suspended_at: "2026-01-01T00:00:00.000Z" });
+    stopQuietly();
+    await handleStripeEvent(ev("a_back", "customer.subscription.updated", 300, sub("sub_A", "active")), deps());
+    expect((await getEstate(user.id))!.resume_pending ?? null).toBeNull();
+    await tick();
+    expect((await getEstate(user.id))!.status).toBe("suspended");
+    expect(fly.machine("m_1").state).toBe("stopped");
   });
 
   it("an estate with no machine on Fly (nothing to start) is resumed inline", async () => {

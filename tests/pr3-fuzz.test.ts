@@ -25,7 +25,11 @@ const fetchImpl = (async (u: any) => {
 }) as any;
 const deps = () => ({ cfg: stripeConfig()!, fly: fly as any, fetchImpl });
 beforeEach(async () => {
-  freshStore();
+  // #29 r4 F1: the tick resumes/revives only for an active subscription with its own paid invoice (mayRunEstate). These
+  // tests are about the Fly lifecycle of PAYING customers, so every subscription here has paid; the unpaid cases live in
+  // paid-estate-drivers, pr3-defer and pr3-reconcile.
+  const st = freshStore();
+  for (const id of ["sub_A", "sub_B"]) await st.setJSON("paid_subscriptions/" + id, { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   readback.delayMs = 2;
   user = await createUser("fz@example.com", "sufficiently-long-pass");
@@ -104,10 +108,16 @@ describe("fuzz interleavings (with and without Fly faults: the wait times out, t
         for (let i = 0; i < 3; i++) { try { await retryPendingSuspend(user.id, fly as any, new Date(Date.now() + 3_600_000)); } catch {} }
         const e = (await getEstate(user.id))!;
         const u = (await getUserById(user.id))!;
-        const granting = sc.bFinal === "active" || sc.bFinal === "past_due";
+        // #29 r4 F1: B (paid) brings the estate back only while ACTIVE; past_due keeps the tier, never resumes, and may keep
+        // an estate that B already had running.
+        const granting = sc.bFinal === "active";
+        const dunning = sc.bFinal === "past_due";
         const obs = { estate: e.status, pending: !!e.suspend_pending, sub: u.billing?.subscription_id, billingStatus: u.billing?.status, machine: fly.machine("m_1").state, autostartOff: fly.autostartOff("m_1"), tier: u.tier };
         if (granting) expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "ready", pending: false, machine: "started", sub: "sub_B", tier: "operator" });
-        else expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "suspended", pending: false, machine: "stopped", autostartOff: true, tier: "sandbox" });
-        expect(fly.ping("m_1")).toBe(granting ? "started" : "stopped");
+        else if (dunning) {
+          expect(obs, JSON.stringify(obs)).toMatchObject({ pending: false, sub: "sub_B", tier: "operator" });
+          expect(["ready/started", "suspended/stopped"], JSON.stringify(obs)).toContain(obs.estate + "/" + obs.machine);
+        } else expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "suspended", pending: false, machine: "stopped", autostartOff: true, tier: "sandbox" });
+        expect(fly.ping("m_1")).toBe(granting ? "started" : dunning ? obs.machine : "stopped");
       }, 30000);
 });

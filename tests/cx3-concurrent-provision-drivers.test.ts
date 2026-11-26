@@ -5,7 +5,7 @@
 // a cancel only the machine on the record was stopped; the orphan kept running with autostart on.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ModelFly } from "./model-fly";
-import { freshStore } from "./helpers";
+import { freshStore, payingFixture } from "./helpers";
 import { createUser, type User } from "../src/lib/users";
 import { advanceEstate, getEstate, queueEstate, readback, saveEstate, suspendEstate, type Estate } from "../src/lib/estates";
 
@@ -46,6 +46,8 @@ beforeEach(async () => {
   Object.assign(process.env, FLY_ENV);
   readback.delayMs = 1;
   user = await createUser("cx3@example.com", "sufficiently-long-pass");
+  // #29 r5 B1: provisioning runs only for an active subscription with its own paid invoice.
+  await payingFixture(user);
   fly = new CreatingFly();
 });
 afterEach(() => {

@@ -6,7 +6,7 @@ import { FlyError } from "../src/lib/fly";
 import { freshStore } from "./helpers";
 import { createUser, getUserById, saveUser, type User } from "../src/lib/users";
 import { stripeConfig } from "../src/lib/stripe";
-import { handleStripeEvent, isGrantingUser, retryPendingSuspend } from "../src/lib/billing";
+import { handleStripeEvent, isGrantingUser, mayRunEstate, retryPendingSuspend } from "../src/lib/billing";
 import { getEstate, listEstates, queueEstate, readback, saveEstate, setEstateAnthropicKey } from "../src/lib/estates";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -65,7 +65,11 @@ async function tick() {
 
 beforeEach(async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
-  freshStore();
+  // #29 r4 F1: the tick resumes/revives only for an active subscription with its own paid invoice (mayRunEstate). These
+  // tests are about the Fly lifecycle of PAYING customers, so every subscription here has paid; the unpaid cases live in
+  // paid-estate-drivers, pr3-defer and pr3-reconcile.
+  const st = freshStore();
+  for (const id of ["sub_A", "sub_B", "sub_C"]) await st.setJSON("paid_subscriptions/" + id, { customer: "cus_1", first_paid_invoice: "in_seed", at: "2026-11-01T00:00:00Z" });
   Object.assign(process.env, STRIPE_ENV, FLY_ENV);
   readback.delayMs = 2;
   user = await createUser("fz@example.com", "sufficiently-long-pass");
@@ -167,9 +171,16 @@ describe("chaos: random Stripe/Fly faults, stale reads, interleavings", () => {
       const obs = { k, finals, estate: e.status, spend: !!e.suspend_pending, resume: !!e.resume_pending, sub: u.billing?.subscription_id, bst: u.billing?.status, tier: u.tier, machine: fly.machine("m_1").state, autoOff: fly.autostartOff("m_1"), rounds, err: e.error };
       if (process.env.RV_DBG && granting && obs.machine !== "started") console.log("DBG", JSON.stringify({obs, flog: fly.log, elog: e.log.map((l:any)=>l.at+" "+l.step+" "+l.note), deliveries: deliveries.map((d:any)=>d.id+"@"+d.created+":"+d.data.object.status)}, null, 1));
       expect(granting, "billing mirror vs Stripe truth " + JSON.stringify(obs)).toBe(expectGrant);
-      if (granting) expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "ready", spend: false, resume: false, machine: "started", tier: "operator" });
-      else expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "suspended", spend: false, machine: "stopped", autoOff: true, tier: "sandbox" });
-      expect(fly.ping("m_1")).toBe(granting ? "started" : "stopped");
+      // #29 r4 F1: only an ACTIVE subscription with its own paid invoice (mayRunEstate) brings the estate back. trialing and
+      // past_due keep the tier but never resume a suspended estate; one kept running from an earlier active paid period
+      // may stay running. Either way the record and the machine agree and nothing is left pending.
+      const running = await mayRunEstate(u);
+      if (running) expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "ready", spend: false, resume: false, machine: "started", tier: "operator" });
+      else if (granting) {
+        expect(obs, JSON.stringify(obs)).toMatchObject({ spend: false, resume: false, tier: "operator" });
+        expect(["ready/started", "suspended/stopped"], JSON.stringify(obs)).toContain(obs.estate + "/" + obs.machine);
+      } else expect(obs, JSON.stringify(obs)).toMatchObject({ estate: "suspended", spend: false, machine: "stopped", autoOff: true, tier: "sandbox" });
+      expect(fly.ping("m_1")).toBe(running ? "started" : granting ? obs.machine : "stopped");
       const all = await listEstates();
       expect(all.length).toBe(1);
       expect(all[0].app).toBe(app0);
