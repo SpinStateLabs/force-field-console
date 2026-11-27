@@ -6,8 +6,8 @@
 //    than the platform's count of code points, so a statement that fits here fits there.
 //  - It names the account email when the whole statement fits and the email is safe identity text; otherwise it names a
 //    short, stable account reference with the same wording. An email is never cut mid-address.
-//  - Safe identity text: a string of 1 to 254 characters with no Unicode control (Cc) or format (Cf) character and no
-//    lone surrogate. The same rule guards the grantor and owner-roster row the console writes into an estate.
+//  - Safe identity text: a string of 1 to 254 characters with no Unicode control (Cc), format (Cf), line separator (Zl,
+//    U+2028) or paragraph separator (Zp, U+2029) character and no lone surrogate. The same rule guards the grantor and owner-roster row the console writes into an estate.
 
 export const SIGNER_MAX = 200;
 export const IDENTITY_MAX = 254;
@@ -15,7 +15,7 @@ export const IDENTITY_MAX = 254;
 const SIGNER_PREFIX = "Force-Field estate key for ";
 const SIGNER_SUFFIX = " (provisioned by Spin State Labs — standing attestation)";
 
-const UNSAFE_CHARS = /[\p{Cc}\p{Cf}]/u;
+const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u; // Zl/Zp: U+2028 / U+2029 break a line in YAML, CSV and logs
 const LONE_SURROGATE = /\p{Cs}/u;
 
 /** True for text the console may write into an estate as a grantor, owner row or signer subject. */
