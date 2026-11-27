@@ -736,6 +736,12 @@ export async function advanceEstate(
       }
     }
   } catch (err: any) {
+    if (err instanceof EstateError && err.code === "machine_transitioning") {
+      e.lease_until = null;
+      logEstate(e, step, "the machine is changing state; this step is retried once it has settled", now);
+      await saveEstate(e, now);
+      return { estate: e, outcome: "waiting", note: "machine transitioning" };
+    }
     e.attempts += 1;
     e.polls = 0; // a fresh polling window per attempt
     // User-visible text is fixed and generic for anything that came from Fly (app names, machine ids, URLs and
@@ -1286,6 +1292,9 @@ export async function updateMachineGuarded(
     let skipLaunch = false;
     if (!(await mayRunEstateFor(e.user_id))) {
       if (!machine) machine = await fly.getMachine(e.app, id);
+      if (machine?.state && TRANSIENT_MACHINE_STATES.has(machine.state)) {
+        throw new EstateError(409, "machine_transitioning", "The estate's machine is changing state; nothing was written. It is retried once the machine has settled.");
+      }
       skipLaunch = !machineRunning(machine);
     }
     const config = build(current);
@@ -1299,9 +1308,18 @@ export async function updateMachineGuarded(
   return withUserLock(e.user_id, run);
 }
 
-/** A machine Fly reports as running (or already starting): a config write restarts it rather than starting it. */
-function machineRunning(m: { state?: string } | null): boolean {
-  return m?.state === "started" || m?.state === "starting";
+/**
+ * Fly's transient machine states (https://docs.fly.io/machines/machine-states). What an update with skip_launch does to a
+ * machine in one of them is not documented, so for an owner who may not run an estate nothing is written into one: the
+ * write is refused as retryable (409 machine_transitioning) and retried once the machine has settled.
+ */
+export const TRANSIENT_MACHINE_STATES: ReadonlySet<string> = new Set([
+  "creating", "starting", "stopping", "suspending", "destroying", "updating", "replacing", "restarting", "launch_failed",
+]);
+
+/** A machine Fly reports as running. A transient state (starting, replacing, restarting, ...) never counts as running. */
+export function machineRunning(m: { state?: string } | null): boolean {
+  return m?.state === "started";
 }
 
 /** How long a deferred image upgrade waits before the tick considers that estate again (r6 C2). */
