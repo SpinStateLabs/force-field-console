@@ -167,6 +167,7 @@ describe("shared sandbox: sentinel checks per account", () => {
   });
 
   it("the ceiling across accounts, when set, answers 503 sandbox_busy, counts only allowed checks, and spends no account budget", async () => {
+    process.env.SANDBOX_ACCOUNT_RPM = "2";
     const keys = [];
     const users = [];
     for (const e of ["g1@example.com", "g2@example.com", "g3@example.com"]) {
@@ -180,7 +181,7 @@ describe("shared sandbox: sentinel checks per account", () => {
     expect((await send(keys[0])).status).toBe(200);
     expect((await send(keys[1])).status).toBe(200);
     expect((await send(keys[2])).status).toBe(200);
-    // keys[0] is now at its account limit of 3: refused by the account check, so the ceiling does not count it
+    // keys[0] is now at its account limit of 2: refused by the account check, so the ceiling does not count it
     expect((await send(keys[0])).status).toBe(429);
     expect(await store.get(GLOBAL_KEY, { type: "json" })).toMatchObject({ count: 3 });
     process.env.SANDBOX_ACCOUNT_RPM = "10";
