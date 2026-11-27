@@ -342,7 +342,9 @@ verified, not what a mature SaaS would do.
   allowed check is counted (day and minute together, one conditional write). A refused check uses up
   nothing (`429 rate_limited_account`, with `retry-after`). If the conditional write of that record
   keeps losing to concurrent writers (3 tries), the check is refused with `429` and `retry-after: 1`
-  rather than let through uncounted. An optional ceiling across all accounts (`SANDBOX_GLOBAL_RPM`,
+  rather than let through uncounted, so a burst of checks from one account may get "busy, retry after
+  1 s". A check refused by the account limit or the ceiling spends nothing in the per-key windows either.
+  An optional ceiling across all accounts (`SANDBOX_GLOBAL_RPM`,
   off unless set; one record) is read first and counted only for allowed checks; it answers
   `503 sandbox_busy` and is approximate.
 - **Provisioning concurrency is best-effort**: the estate record is CREATED with a create-only

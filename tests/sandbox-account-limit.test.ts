@@ -203,6 +203,31 @@ describe("shared sandbox: sentinel checks per account", () => {
     expect(warn).toHaveBeenCalledWith(JSON.stringify({ gateway_refusal: "sandbox_busy" }));
   });
 
+  it("a check refused by the account limit spends nothing in the per-key windows; other calls still count per key", async () => {
+    const u = await account("perkey@example.com");
+    const { plaintext: k, ref } = await issueKey((await getUserById(u.id))!, "k");
+    const dayKey = `rate/${ref.hash}/d20261126`;
+    const minKey = `rate/${ref.hash}/m202611261200`;
+    const codes: number[] = [];
+    for (let i = 0; i < 5; i++) codes.push((await send(k)).status); // account limit 3 per minute
+    expect(codes).toEqual([200, 200, 200, 429, 429]);
+    expect((await store.get(dayKey, { type: "json" })).count).toBe(3); // the two refused checks spent no key slot
+    expect((await store.get(minKey, { type: "json" })).count).toBe(3);
+    expect((await send(k, "/ledger/health", "GET")).status).toBe(200); // a read is counted per key as before
+    expect((await send(k, "/nope")).status).toBe(404); // so is a refused path, as before
+    expect((await store.get(dayKey, { type: "json" })).count).toBe(5);
+  });
+
+  it("a check refused by the ceiling spends nothing in the per-key windows", async () => {
+    process.env.SANDBOX_GLOBAL_RPM = "1";
+    const a = await newKey(await account("c1@example.com"));
+    const u = await account("c2@example.com");
+    const { plaintext: k, ref } = await issueKey((await getUserById(u.id))!, "k");
+    expect((await send(a)).status).toBe(200);
+    expect((await send(k)).status).toBe(503);
+    expect(await store.get(`rate/${ref.hash}/d20261126`, { type: "json" })).toBeNull();
+  });
+
   it("a dedicated estate is not counted", async () => {
     Object.assign(process.env, { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" });
     process.env.SANDBOX_ACCOUNT_RPM = "1";
