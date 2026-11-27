@@ -78,8 +78,25 @@ describe("isSafeIdentityText: the rule for the grantor and owner row", () => {
   it.each(["ceo@example.com", "josé@exemple.fr", "pair😀@example.com", "x".repeat(254)])("accepts %j", (v) => {
     expect(isSafeIdentityText(v)).toBe(true);
   });
-  it.each(["", "x".repeat(255), "a\u0000b", "a\u007fb", "a\u0085b", "a​b", "a‮b", "a﻿b", "a\ud800b", 42, null])("refuses %j", (v) => {
+  it.each(["", "x".repeat(255), "a\u0000b", "a\u007fb", "a\u0085b", "a​b", "a‮b", "a﻿b", "a\ud800b", "a\u2028b", "a\u2029b", "ceo\u2028@example.com", 42, null])("refuses %j", (v) => {
     expect(isSafeIdentityText(v)).toBe(false);
+  });
+});
+
+describe("line and paragraph separators (Zl, Zp)", () => {
+  it("an email with U+2028 or U+2029 is never named in the signer statement", () => {
+    for (const sep of ["\u2028", "\u2029"]) {
+      const s = estateSigner(`ceo${sep}x@example.com`, UID);
+      expect(s).not.toContain(sep);
+      expect(s).toContain(accountRef(UID));
+    }
+  });
+  it("the grantor check refuses them before any Fly call", async () => {
+    let flyCalls = 0;
+    const fly = { exec: async () => { flyCalls += 1; return { exit_code: 0, stdout: "{}", stderr: "" }; } } as any;
+    const e = { app: "ff-est-00000000", machine_id: "m", status: "ready", grantor: "ceo\u2028@example.com", user_id: UID } as unknown as Estate;
+    await expect(updateEstateRoster(e, fly, { allowed_scope: ["draft"], max_ttl_days: 30 })).rejects.toMatchObject({ code: "grantor_unsafe" });
+    expect(flyCalls).toBe(0);
   });
 });
 
