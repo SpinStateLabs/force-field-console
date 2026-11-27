@@ -155,6 +155,15 @@ describe("shared sandbox: sentinel checks per account", () => {
     expect(TIERS.sandbox.rpd - rec.d).toBe(190);
   });
 
+  it("a malformed stored count is read as full (refused), never as zero", async () => {
+    const u = await account("malformed@example.com");
+    const k = await newKey(u);
+    await store.setJSON(accountKey(u.id), { day: "20261126", d: "lots", minute: "202611261200", m: 0 });
+    const r = await send(k);
+    expect(r.status).toBe(429);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("one record per account holds both windows (no record per minute)", async () => {
     const u = await account("onerecord@example.com");
     const k = await newKey(u);
