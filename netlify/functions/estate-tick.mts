@@ -14,7 +14,7 @@ import { getUserById } from "../../src/lib/users";
 import { flyHeld, mayRunEstate, retryPendingSuspend } from "../../src/lib/billing";
 import { mayRunEstateFor } from "../../src/lib/paid";
 import { portalStore } from "../../src/lib/store";
-import { renewalDue } from "../../src/lib/renewal";
+import { renewalBlocked, renewalDue } from "../../src/lib/renewal";
 import { kickWorker } from "../../src/lib/worker";
 
 const BUDGET_MS = 20000;
@@ -151,8 +151,17 @@ export default async (_req: Request): Promise<Response> => {
   for (const e of pending) {
     if (Date.now() - started > BUDGET_MS) break;
     // A record whose owner may not run an estate is parked by advanceEstate anyway: skip it here, so parked records
-    // never use up the tick's budget ahead of renewals (review #29 full verdict, LOW 1).
-    if (!(await mayRunEstateFor(e.user_id))) {
+    // never use up the tick's budget ahead of renewals (review #29 full verdict, LOW 1). One record whose lookup fails
+    // is counted and skipped; it never ends the tick.
+    let runnable: boolean;
+    try {
+      runnable = await mayRunEstateFor(e.user_id);
+    } catch (err: any) {
+      bump("eligibility_failed");
+      console.error("estate-tick: eligibility lookup failed for an estate:", String(err?.constructor?.name ?? typeof err));
+      continue;
+    }
+    if (!runnable) {
       bump("parked");
       continue;
     }
@@ -170,9 +179,17 @@ export default async (_req: Request): Promise<Response> => {
   }
   for (const e of due) {
     if (Date.now() - started > BUDGET_MS) break;
-    // LOW 3: no renewal for an owner who may not run the estate (its machine may be stopped; the in-machine mint would
-    // fail and be retried every tick). It renews once the owner qualifies again.
-    if (!(await mayRunEstateFor(e.user_id))) {
+    // LOW 3 (rule in renewalBlocked): an owner who may not run the estate is skipped only while the machine is not
+    // running; a running estate in dunning still renews. A failing check is counted and skipped; it never ends the tick.
+    let blocked: boolean;
+    try {
+      blocked = await renewalBlocked(e, fly);
+    } catch (err: any) {
+      bump("renew_check_failed");
+      console.error("estate-tick: renewal check failed for an estate:", String(err?.constructor?.name ?? typeof err));
+      continue;
+    }
+    if (blocked) {
       bump("renew_skipped_ineligible");
       continue;
     }

@@ -66,29 +66,63 @@ describe("tick budget and renewals under the paid rule", () => {
     expect(Object.keys(body.outcomes).some((k) => k === "kicked" || k.startsWith("direct_"))).toBe(true);
   });
 
-  it("a renewal due for an ineligible owner is not kicked; an eligible owner's is", async () => {
-    for (const [email, status, paid] of [["late@example.com", "past_due", true], ["ok@example.com", "active", true]] as const) {
-      const u = await owner(email, status, paid);
-      const e = await queueEstate(u);
-      Object.assign(e, { status: "ready", step: "done", machine_id: "m_" + email[0], volume_id: "vol_1", url: `https://${e.app}.fly.dev`, self_agents: {} });
-      await saveEstate(e);
-      fly.machine("m_" + email[0]);
-    }
+  async function readyWith(email: string, status: string, machineState: string) {
+    const u = await owner(email, status, true);
+    const e = await queueEstate(u);
+    const mid = "m_" + email.split("@")[0];
+    Object.assign(e, { status: "ready", step: "done", machine_id: mid, volume_id: "vol_1", url: `https://${e.app}.fly.dev`, self_agents: {} });
+    await saveEstate(e);
+    fly.machine(mid, { state: machineState });
+    return u;
+  }
+
+  it("renewals: an eligible owner is kicked; an ineligible owner is skipped only while the machine is stopped", async () => {
+    await readyWith("ok@example.com", "active", "started");
+    await readyWith("dunning@example.com", "past_due", "started"); // running in dunning: still renews
+    await readyWith("asleep@example.com", "past_due", "stopped"); // stopped and ineligible: skipped
     const body = await tick();
-    expect(body.renewals_due).toBe(2);
+    expect(body.renewals_due).toBe(3);
     expect(body.outcomes.renew_skipped_ineligible).toBe(1);
-    expect((body.outcomes.renew_kicked ?? 0) + (body.outcomes.renew_kick_failed ?? 0)).toBe(1);
+    expect((body.outcomes.renew_kicked ?? 0) + (body.outcomes.renew_kick_failed ?? 0)).toBe(2);
   });
 
-  it("the worker refuses a renewal for an ineligible owner (a kick queued before the owner stopped qualifying)", async () => {
-    const u = await owner("stale@example.com", "past_due", true);
-    const e = await queueEstate(u);
-    Object.assign(e, { status: "ready", step: "done", machine_id: "m_s", volume_id: "vol_1", url: `https://${e.app}.fly.dev`, self_agents: {} });
-    await saveEstate(e);
+  it("the worker refuses a renewal only for an ineligible owner whose machine is not running", async () => {
+    const stopped = await readyWith("stale@example.com", "past_due", "stopped");
     const calls: string[] = [];
-    const spy: any = new Proxy({}, { get: (_t, name) => async () => { calls.push(String(name)); return {}; } });
-    const r = await runWorker(u.id, "renew", spy);
-    expect(r.last).toBe("renew_skipped_ineligible");
-    expect(calls).toEqual([]);
+    const rec: any = new Proxy(fly, { get: (target: any, name) => {
+      const v = target[name];
+      return typeof v === "function" ? (...args: any[]) => { calls.push(String(name)); return v.apply(target, args); } : v;
+    } });
+    const r1 = await runWorker(stopped.id, "renew", rec);
+    expect(r1.last).toBe("renew_skipped_ineligible");
+    expect(calls).toEqual(["getMachine"]); // a read only: no exec, no secret, no machine write
+    const running = await readyWith("awake@example.com", "past_due", "started");
+    const r2 = await runWorker(running.id, "renew", rec);
+    expect(r2.last).not.toBe("renew_skipped_ineligible");
+  });
+
+  it("one record whose owner lookup throws is counted and skipped; the tick goes on (pending and renewals)", async () => {
+    const bad = await owner("broken@example.com", "active", true);
+    const eb = await queueEstate(bad);
+    eb.status = "provisioning";
+    await saveEstate(eb);
+    const good = await owner("fine@example.com", "active", true);
+    const eg = await queueEstate(good);
+    eg.status = "provisioning";
+    await saveEstate(eg);
+    const badR = await readyWith("brokenready@example.com", "active", "started");
+    const okR = await readyWith("fineready@example.com", "active", "started");
+    const realGet = st.get.bind(st);
+    st.get = async (k: string, o: any) => {
+      if (k === "uid/" + bad.id || k === "uid/" + badR.id) throw new Error("store unavailable for this key");
+      return realGet(k, o);
+    };
+    const body = await tick();
+    expect(body.ok).toBe(true);
+    expect(body.outcomes.eligibility_failed).toBe(1);
+    expect(body.outcomes.renew_check_failed).toBe(1);
+    expect(Object.keys(body.outcomes).some((k) => k === "kicked" || k.startsWith("direct_"))).toBe(true); // the good record
+    expect((body.outcomes.renew_kicked ?? 0) + (body.outcomes.renew_kick_failed ?? 0)).toBe(1); // the good renewal
+    void okR;
   });
 });

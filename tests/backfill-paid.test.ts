@@ -236,14 +236,27 @@ describe("planBackfill (read-only)", () => {
     const { estates } = await planBackfill(stripeConfig()!, NOW, s.impl);
     const by = (u: User) => estates.find((x) => x.user_id === u.id)!;
     expect(by(resumes)).toMatchObject({ may_run: true, outlook: "resumes (suspended; owner active and paid)" });
-    expect(by(held).outlook).toBe("held (test-mode grant; never started)");
+    expect(by(held).outlook).toBe("held (test-mode grant; starts only after a live-mode grant)");
+  });
+
+  it("an account whose grant came from a test-mode event is held, not resumed (flyHeld)", async () => {
+    const u = await createUser("tm@example.com", "sufficiently-long-pass");
+    u.tier = "operator";
+    u.billing = { customer_id: "cus_1", subscription_id: "sub_tm", status: "active", price_id: "price_op", tier: "operator", current_period_end: null, updated_at: "t", test_mode: true } as any;
+    await saveUser(u);
+    const e = await queueEstate(u);
+    e.status = "suspended" as any;
+    await saveEstate(e, undefined, { owns: ["status"] });
+    const s = stripe({ sub_tm: { id: "sub_tm", status: "active", customer: "cus_1" } }, { sub_tm: [inv({ subscription: "sub_tm" })] });
+    const { estates } = await planBackfill(stripeConfig()!, NOW, s.impl);
+    expect(estates.find((x) => x.user_id === u.id)!.outlook).toBe("held (test-mode grant; starts only after a live-mode grant)");
   });
 
   it("truncated lines are also flagged when the invoice names its subscription only under parent.subscription_details", async () => {
     await legacyReady();
     const s = stripe(
       { sub_1: { id: "sub_1", status: "active", customer: "cus_1" } },
-      { sub_1: [inv({ subscription: undefined, parent: { subscription_details: { subscription: "sub_1" } }, lines: { data: [{ price: { id: "price_pack" }, amount: 2400 }], has_more: true } })] },
+      { sub_1: [inv({ subscription: undefined, parent: { subscription_details: { subscription: { id: "sub_1", object: "subscription" } } }, lines: { data: [{ price: { id: "price_pack" }, amount: 2400 }], has_more: true } })] },
     );
     const { rows } = await planBackfill(stripeConfig()!, NOW, s.impl);
     expect(rows[0]).toMatchObject({ action: "skip" });
