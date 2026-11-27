@@ -32,6 +32,8 @@ export type RefusalCode =
   | "outside_prefix"
   | "bad_estate_base"
   | "estate_url_mismatch"
+  | "sandbox_account_limit"
+  | "sandbox_busy"
   | "target_outside_base"
   | "upstream_redirect"
   | "path_not_allowed"
