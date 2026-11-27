@@ -799,6 +799,7 @@ export async function retryEstate(e: Estate, now: Date = new Date()): Promise<Es
   e.attempts = 0;
   e.polls = 0;
   e.error = null;
+  e.transitioning_since = null; // a retry starts a fresh wait for a machine that is changing state
   // A manual retry supersedes a pending automatic one; the count of automatic retries already done is kept.
   if (e.provision_retry) e.provision_retry = { count: e.provision_retry.count, next_retry_at: null };
   logEstate(e, e.step, "retry requested", now);
@@ -827,7 +828,8 @@ export async function autoRetryFailedEstate(e: Estate, now: Date = new Date()): 
   if (!provisionRetryDue(e, now)) return false;
   const due = e.provision_retry!.next_retry_at;
   const count = e.provision_retry!.count + 1;
-  const next: Estate = { ...e, log: [...e.log], status: "provisioning", attempts: 0, polls: 0, error: null, lease_until: null, provision_retry: { count, next_retry_at: null } };
+  // transitioning_since cleared: the retry starts a fresh wait for a machine that is changing state, as retryEstate does
+  const next: Estate = { ...e, log: [...e.log], status: "provisioning", attempts: 0, polls: 0, error: null, lease_until: null, transitioning_since: null, provision_retry: { count, next_retry_at: null } };
   logEstate(next, next.step, `automatic retry ${count} of ${MAX_AUTO_PROVISION_RETRIES} after the provisioning failed`, now);
   const ok = await saveEstate(next, now, {
     onlyIf: (cur) => cur.status === "error" && !cur.suspend_pending && cur.attempts >= MAX_ATTEMPTS && cur.provision_retry?.next_retry_at === due,

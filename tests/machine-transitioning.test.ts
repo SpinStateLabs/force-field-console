@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
-import { EstateError, TRANSIENT_MACHINE_STATES, TRANSITIONING_WAIT_MS, advanceEstate, getEstate, machineRunning, queueEstate, saveEstate, setEstateAnthropicKey, updateMachineGuarded, upgradeEstateImage } from "../src/lib/estates";
+import { EstateError, MAX_ATTEMPTS, TRANSIENT_MACHINE_STATES, TRANSITIONING_WAIT_MS, advanceEstate, autoRetryFailedEstate, getEstate, machineRunning, queueEstate, retryEstate, saveEstate, setEstateAnthropicKey, updateMachineGuarded, upgradeEstateImage } from "../src/lib/estates";
 import { emailKey } from "../src/lib/users";
 
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
@@ -157,6 +157,51 @@ describe("transient machine states", () => {
     expect(after.attempts).toBe(1);
     expect(after.error).toMatch(/changing state/);
   });
+
+  /** A record that gave up after a timed-out wait: error state, attempts exhausted, marker 40 minutes old. */
+  async function failedAfterWait(email: string) {
+    const e = await estateFor(email, "active");
+    Object.assign(e, {
+      status: "error", step: "arm", attempts: MAX_ATTEMPTS, error: "the machine is changing state",
+      transitioning_since: new Date(Date.now() - (TRANSITIONING_WAIT_MS + 10 * 60_000)).toISOString(),
+      provision_retry: { count: 0, next_retry_at: new Date(Date.now() - 1000).toISOString() },
+    });
+    await saveEstate(e);
+    return e;
+  }
+
+  /** The owner qualifies at the provisioning gate, then stops qualifying before the write (as in armWaiting). */
+  function raceToIneligible(email: string) {
+    const key = emailKey(email);
+    const realGet = st.get.bind(st);
+    let reads = 0;
+    st.get = async (k: string, o: any) => {
+      const v = await realGet(k, o);
+      if (k === key && v && ++reads > 1) return { ...v, billing: { ...v.billing, status: "past_due" } };
+      return v;
+    };
+  }
+
+  for (const [name, retry] of [
+    ["the owner's retry (retryEstate)", async (e: any) => { await retryEstate(e); }],
+    ["the tick's automatic retry (autoRetryFailedEstate)", async (e: any) => { expect(await autoRetryFailedEstate(e)).toBe(true); }],
+  ] as const) {
+    it(`${name} starts a fresh wait: the old marker is cleared and a transient machine is waited on, not counted`, async () => {
+      const email = name.startsWith("the owner") ? "retrywait@example.com" : "autowait@example.com";
+      const e = await failedAfterWait(email);
+      await retry((await getEstate(e.user_id))!);
+      const reset = (await getEstate(e.user_id))!;
+      expect(reset.status).toBe("provisioning");
+      expect(reset.transitioning_since ?? null).toBeNull();
+      raceToIneligible(email);
+      const t0 = Date.now();
+      const r = await advanceEstate((await getEstate(e.user_id))!, fakeFly("replacing").fly);
+      expect(r.outcome).toBe("waiting");
+      const after = (await getEstate(e.user_id))!;
+      expect(after.attempts).toBe(0);
+      expect(new Date(after.transitioning_since!).getTime()).toBeGreaterThanOrEqual(t0 - 1000); // a new marker, from now
+    });
+  }
 
   it("the marker is cleared when the machine has settled and the step runs", async () => {
     const e = await estateFor("settled@example.com", "active");
