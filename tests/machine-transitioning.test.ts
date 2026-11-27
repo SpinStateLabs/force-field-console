@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
-import { EstateError, MAX_ATTEMPTS, TRANSIENT_MACHINE_STATES, TRANSITIONING_WAIT_MS, advanceEstate, autoRetryFailedEstate, getEstate, machineRunning, queueEstate, retryEstate, saveEstate, setEstateAnthropicKey, updateMachineGuarded, upgradeEstateImage } from "../src/lib/estates";
+import { EstateError, MAX_ATTEMPTS, TRANSIENT_MACHINE_STATES, TRANSITIONING_WAIT_MS, advanceEstate, autoRetryFailedEstate, getEstate, machineRunning, queueEstate, resumeEstate, retryEstate, saveEstate, suspendEstate, setEstateAnthropicKey, updateMachineGuarded, upgradeEstateImage } from "../src/lib/estates";
 import { emailKey } from "../src/lib/users";
 
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
@@ -202,6 +202,34 @@ describe("transient machine states", () => {
       expect(new Date(after.transitioning_since!).getTime()).toBeGreaterThanOrEqual(t0 - 1000); // a new marker, from now
     });
   }
+
+  it("a suspension clears the marker (the suspend write owns it)", async () => {
+    const e = await estateFor("suspwait@example.com", "active");
+    Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: new Date(Date.now() - 20 * 60_000).toISOString() });
+    await saveEstate(e);
+    await suspendEstate((await getEstate(e.user_id))!, null, new Date(), "subscription canceled");
+    const after = (await getEstate(e.user_id))!;
+    expect(after.status).toBe("suspended");
+    expect(after.suspended_from).toBe("provisioning");
+    expect(after.transitioning_since ?? null).toBeNull();
+  });
+
+  it("a resume clears the marker, so the resumed step starts a fresh wait (the resume write owns it)", async () => {
+    const e = await estateFor("reswait@example.com", "active");
+    Object.assign(e, {
+      status: "suspended", suspended_from: "provisioning", suspended_at: new Date().toISOString(), step: "arm", attempts: 0,
+      transitioning_since: new Date(Date.now() - (TRANSITIONING_WAIT_MS + 10 * 60_000)).toISOString(),
+    });
+    await saveEstate(e);
+    await resumeEstate((await getEstate(e.user_id))!, null);
+    const resumed = (await getEstate(e.user_id))!;
+    expect(resumed.status).toBe("provisioning");
+    expect(resumed.transitioning_since ?? null).toBeNull();
+    raceToIneligible("reswait@example.com");
+    const r = await advanceEstate((await getEstate(e.user_id))!, fakeFly("replacing").fly);
+    expect(r.outcome).toBe("waiting"); // a fresh wait, not an attempt counted at once against the old marker
+    expect((await getEstate(e.user_id))!.attempts).toBe(0);
+  });
 
   it("the marker is cleared when the machine has settled and the step runs", async () => {
     const e = await estateFor("settled@example.com", "active");
