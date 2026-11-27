@@ -231,6 +231,34 @@ describe("transient machine states", () => {
     expect((await getEstate(e.user_id))!.attempts).toBe(0);
   });
 
+  it("a whole-record write from an older copy keeps the suspended record's cleared marker", async () => {
+    const e = await estateFor("stalewait@example.com", "active");
+    Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: new Date(Date.now() - 20 * 60_000).toISOString() });
+    await saveEstate(e);
+    const older = (await getEstate(e.user_id))!;
+    await suspendEstate((await getEstate(e.user_id))!, null, new Date(), "subscription canceled");
+    await saveEstate(older);
+    const after = (await getEstate(e.user_id))!;
+    expect(after.status).toBe("suspended");
+    expect(after.transitioning_since ?? null).toBeNull();
+  });
+
+  it("a resume that finds the machine gone clears the marker", async () => {
+    const e = await estateFor("gonewait@example.com", "active");
+    Object.assign(e, {
+      status: "suspended", suspended_from: "ready", suspended_at: new Date().toISOString(),
+      transitioning_since: new Date(Date.now() - 20 * 60_000).toISOString(),
+    });
+    await saveEstate(e);
+    const goneFly = { getMachine: async () => null, listMachines: async () => [] } as any;
+    await resumeEstate((await getEstate(e.user_id))!, goneFly);
+    const after = (await getEstate(e.user_id))!;
+    expect(after.status).toBe("error");
+    expect(after.error).toMatch(/^machine_missing/);
+    expect(after.machine_id).toBeNull();
+    expect(after.transitioning_since ?? null).toBeNull();
+  });
+
   it("the marker is cleared when the machine has settled and the step runs", async () => {
     const e = await estateFor("settled@example.com", "active");
     Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: new Date(Date.now() - 5 * 60_000).toISOString() });

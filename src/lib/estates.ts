@@ -255,6 +255,7 @@ function mergeSuspendWins(cur: Estate, mine: Estate): Estate {
   if (suspended) {
     out.status = "suspended";
     out.suspended_at = cur.suspended_at;
+    out.transitioning_since = cur.transitioning_since ?? null; // the suspension ended any wait: the stored value stays
     // The worker may have advanced the record (e.g. to ready) before the suspension landed.
     out.suspended_from = mine.status !== "suspended" && mine.status !== "pending_manual" ? mine.status : cur.suspended_from;
     out.lease_until = null;
