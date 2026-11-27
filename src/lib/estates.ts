@@ -226,7 +226,7 @@ export async function saveEstate(e: Estate, now: Date = new Date(), opts: { owns
   throw new EstateError(409, "estate_write_conflict", "The estate record kept changing underneath this write; try again.");
 }
 
-type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step" | "resume_pending" | "test_hold";
+type OwnedField = "status" | "suspended_from" | "suspended_at" | "suspend_pending" | "health" | "machine_id" | "error" | "step" | "resume_pending" | "test_hold" | "transitioning_since";
 
 /** A test-mode grant holds an existing, not-yet-running record (only that field is written; review r1 C1). */
 export async function holdForTestMode(e: Estate, now: Date = new Date()): Promise<Estate> {
@@ -241,9 +241,10 @@ export async function releaseTestHold(e: Estate, now: Date = new Date()): Promis
   await saveEstate(e, now, { owns: ["test_hold"] });
   return (await getEstate(e.user_id)) ?? e;
 }
-const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health", "resume_pending"];
+// transitioning_since: a suspension or a resume ends any wait on a machine that was changing state; the next step starts a fresh one
+const OWN_SUSPEND: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "health", "resume_pending", "transitioning_since"];
 const OWN_PENDING: readonly OwnedField[] = ["suspend_pending", "health"];
-const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "resume_pending", "health"];
+const OWN_RESUME: readonly OwnedField[] = ["status", "suspended_from", "suspended_at", "suspend_pending", "resume_pending", "health", "transitioning_since"];
 const OWN_RESUME_PENDING: readonly OwnedField[] = ["resume_pending", "health"];
 
 function mergeSuspendWins(cur: Estate, mine: Estate): Estate {
@@ -996,6 +997,7 @@ export async function suspendEstate(
   }
   e.suspend_pending = null;
   e.resume_pending = null;
+  e.transitioning_since = null; // a wait on a changing machine does not survive a suspension
   if (e.health && /^(suspend|resume) (pending|failed)/.test(e.health.note)) e.health = null;
   await saveEstate(e, now, { owns: discovered ? [...OWN_SUSPEND, "machine_id"] : OWN_SUSPEND, onlyIf });
   return e;
@@ -1164,6 +1166,7 @@ function markMachineMissing(e: Estate, now: Date): void {
   e.suspended_from = null;
   e.suspended_at = null;
   e.suspend_pending = null;
+  e.transitioning_since = null; // written by the same owned save (OWN_RESUME); a retry starts any wait afresh
   e.health = { ok: false, checked_at: now.toISOString(), note: "machine_missing: the Fly machine is gone; operator action needed (retry re-creates it on the existing volume)" };
 }
 
@@ -1265,6 +1268,7 @@ export async function resumeEstate(e: Estate, fly: FlyClient | null, now: Date =
   e.suspended_at = null;
   e.suspend_pending = null;
   e.resume_pending = null;
+  e.transitioning_since = null; // the resumed record's next step starts a fresh wait if the machine is changing state
   if (e.health && !e.health.ok && /^(suspend|resume) (pending|failed)/.test(e.health.note)) e.health = null;
   await saveEstate(e, now, { owns: OWN_RESUME });
   return e;
