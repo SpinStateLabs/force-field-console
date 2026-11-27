@@ -91,6 +91,8 @@ export type Estate = {
   /** r6 C2: an image upgrade that could not START the stopped machine of an owner who may not run an estate; the tick
    *  looks at it again after UPGRADE_DEFER_MS (never blocking the rollout of other estates meanwhile). */
   upgrade_deferred?: { image: string; at: string } | null;
+  /** When a provisioning step first waited on a machine in a transient state; null once the machine has settled. */
+  transitioning_since?: string | null;
   health: EstateHealth | null;
   /** An image that failed to reach the armed posture on this estate; the tick will not retry it. */
   upgrade_failed_image: string | null;
@@ -736,6 +738,20 @@ export async function advanceEstate(
       }
     }
   } catch (err: any) {
+    if (err instanceof EstateError && err.code === "machine_transitioning") {
+      const since = e.transitioning_since ? new Date(e.transitioning_since).getTime() : NaN;
+      if (!Number.isFinite(since) || now.getTime() - since < TRANSITIONING_WAIT_MS) {
+        // Bounded wait: no attempt is spent while the machine settles, for at most TRANSITIONING_WAIT_MS.
+        if (!Number.isFinite(since)) e.transitioning_since = now.toISOString();
+        e.lease_until = null;
+        logEstate(e, step, "the machine is changing state; this step is retried once it has settled", now);
+        await saveEstate(e, now);
+        return { estate: e, outcome: "waiting", note: "machine transitioning" };
+      }
+      // Past the bound: an ordinary failed attempt (counted; error state and ALERT after MAX_ATTEMPTS), below.
+    } else {
+      e.transitioning_since = null; // any other failure: the machine was not what stopped this step
+    }
     e.attempts += 1;
     e.polls = 0; // a fresh polling window per attempt
     // User-visible text is fixed and generic for anything that came from Fly (app names, machine ids, URLs and
@@ -770,6 +786,7 @@ export async function advanceEstate(
   }
 
   e.lease_until = null;
+  e.transitioning_since = null; // the step ran: the machine settled
   await saveEstate(e, now);
   if (e.status === "ready") return { estate: e, outcome: "done", note: "ready" };
   return { estate: e, outcome: "progressed", note: `next: ${e.step}` };
@@ -1286,6 +1303,9 @@ export async function updateMachineGuarded(
     let skipLaunch = false;
     if (!(await mayRunEstateFor(e.user_id))) {
       if (!machine) machine = await fly.getMachine(e.app, id);
+      if (machine?.state && TRANSIENT_MACHINE_STATES.has(machine.state)) {
+        throw new EstateError(409, "machine_transitioning", "The estate's machine is changing state; nothing was written. It is retried once the machine has settled.");
+      }
       skipLaunch = !machineRunning(machine);
     }
     const config = build(current);
@@ -1299,9 +1319,43 @@ export async function updateMachineGuarded(
   return withUserLock(e.user_id, run);
 }
 
-/** A machine Fly reports as running (or already starting): a config write restarts it rather than starting it. */
-function machineRunning(m: { state?: string } | null): boolean {
-  return m?.state === "started" || m?.state === "starting";
+/**
+ * Fly's transient machine states that are passing (https://docs.fly.io/machines/machine-states, "Transient states"):
+ *   creating   - "Machine is being initialized"
+ *   starting   - "Transitioning from stopped or suspended to started"
+ *   stopping   - "Transitioning from started to stopped"
+ *   suspending - "Transitioning from started to suspended"
+ *   destroying - "User asked for the Machine to be completely removed"
+ *   updating   - "Machine is being updated to a new version"
+ *   replacing  - "User-initiated configuration change (image, VM size, etc.) in progress"
+ *   restarting - "Machine is restarting"
+ * Not here: launch_failed ("Machine failed to launch; will transition to destroyed") is a failed start, not a passing
+ * state: it counts as not running (skip_launch, as for any machine that is not running).
+ * What an update with skip_launch does to a machine in one of these states is not documented, so for an owner who may
+ * not run an estate nothing is written into one: the write is refused as retryable (409 machine_transitioning).
+ */
+export const TRANSIENT_MACHINE_STATES: ReadonlySet<string> = new Set([
+  "creating", "starting", "stopping", "suspending", "destroying", "updating", "replacing", "restarting",
+]);
+
+/** How long a provisioning step may wait on a transitioning machine before it is treated as a failed attempt. */
+export const TRANSITIONING_WAIT_MS = 30 * 60_000;
+
+/**
+ * For an owner who may not run the estate, refuse (409 machine_transitioning) BEFORE anything is written when the machine
+ * is in a transient state. Used by writes that change something before the guarded machine update (key placement).
+ */
+async function refuseIfTransitioningForIneligible(e: Estate, fly: FlyClient): Promise<void> {
+  if (!e.machine_id || (await mayRunEstateFor(e.user_id))) return;
+  const m = (await fly.getMachine(e.app, e.machine_id)) as { state?: string } | null;
+  if (m?.state && TRANSIENT_MACHINE_STATES.has(m.state)) {
+    throw new EstateError(409, "machine_transitioning", "The estate's machine is changing state; nothing was written. Retry once it has settled.");
+  }
+}
+
+/** A machine Fly reports as running. A transient state (starting, replacing, restarting, ...) never counts as running. */
+export function machineRunning(m: { state?: string } | null): boolean {
+  return m?.state === "started";
 }
 
 /** How long a deferred image upgrade waits before the tick considers that estate again (r6 C2). */
@@ -1372,6 +1426,7 @@ export async function reverifyBackoffUntil(userId: string): Promise<Date | null>
 export async function setEstateAnthropicKey(e: Estate, fly: FlyClient, key: string, now: Date = new Date()): Promise<Estate> {
   if (e.status !== "ready") throw new EstateError(409, "estate_not_ready", "The estate must be ready before a key can be placed.");
   const k = validateAnthropicKey(key);
+  await refuseIfTransitioningForIneligible(e, fly); // before setSecrets: "nothing was written" stays true
   await fly.setSecrets(e.app, { ANTHROPIC_API_KEY: k });
   const { launched } = await updateMachineGuarded(e, fly, (cur) => cur!, { readCurrent: true });
   e.anthropic_key_set_at = now.toISOString();
@@ -1541,7 +1596,17 @@ export async function upgradeEstateImage(
   const from = e.image ?? "unknown";
   logEstate(e, "upgrade", `updating the machine image ${from} -> ${target}${opts.force ? " (forced re-apply)" : ""}; armed posture re-verified afterwards`, now);
   await saveEstate(e, now);
-  const { launched } = await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor)));
+  let launched: boolean;
+  try {
+    ({ launched } = await updateMachineGuarded(e, fly, () => estateMachineConfig(cfg, e.volume_id!, "armed", attestSigner(e.grantor))));
+  } catch (err) {
+    if (!(err instanceof EstateError && err.code === "machine_transitioning")) throw err;
+    // The machine was changing state inside the lock: nothing was written. Deferred like a stopped machine, not failed.
+    e.upgrade_deferred = { image: target, at: now.toISOString() };
+    logEstate(e, "upgrade", `image ${target} not applied: the machine was changing state; retried later`, now);
+    await saveEstate(e, now);
+    return { estate: e, outcome: "unchanged" };
+  }
   if (!launched) {
     // r7 F3: the check inside the lock staged the update (the machine stopped, or the owner stopped qualifying, after the
     // pre-check). Not a failed rollout: no posture poll (it would wake the machine through autostart and then halt the

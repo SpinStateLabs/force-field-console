@@ -9,7 +9,7 @@
 // machine so the processes restart with them (about a minute of downtime).
 // Token ids never land on the estate record.
 
-import { EstateError, SELF_AGENTS, estateSecret, lastJsonLine, logEstate, redactSecret, saveEstate, updateMachineGuarded, type Estate } from "./estates";
+import { EstateError, SELF_AGENTS, estateSecret, lastJsonLine, logEstate, machineRunning, redactSecret, saveEstate, updateMachineGuarded, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
 import { mayRunEstateFor } from "./paid";
 
@@ -51,7 +51,7 @@ export function renewalDue(e: Estate, now: Date = new Date()): boolean {
 export async function renewalBlocked(e: Estate, fly: FlyClient): Promise<boolean> {
   if (await mayRunEstateFor(e.user_id)) return false;
   const m = e.machine_id ? ((await fly.getMachine(e.app, e.machine_id, 8000)) as { state?: string } | null) : null;
-  return !(m?.state === "started" || m?.state === "starting");
+  return !machineRunning(m); // a transient state is not running: the renewal waits for it to settle
 }
 
 /** Mint fresh 30-day tokens for the three self-agents, set them as secrets, restart the machine. */
