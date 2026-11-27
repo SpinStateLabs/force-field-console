@@ -7,7 +7,7 @@ import { portalStore } from "./store";
 import { getUserById } from "./users";
 import { listEstates } from "./estates";
 import { stripeRequest, StripeError, type StripeConfig } from "./stripe";
-import { PAID_SUBSCRIPTIONS_PREFIX, isPaidSubscription, isTierPaymentInvoice } from "./billing";
+import { PAID_SUBSCRIPTIONS_PREFIX, flyHeld, isPaidSubscription, isTierPaymentInvoice } from "./billing";
 
 type FetchLike = (url: string, init?: any) => Promise<Response>;
 
@@ -35,7 +35,7 @@ export type EstateOutlook = {
   subscription_status: string | null;
   /** True when the current subscription is active AND paid (already recorded, or written by this backfill). */
   may_run: boolean;
-  outlook: "runs" | "parked (no provisioning)" | "suspended on the next subscription event" | "kept running (paid, not active)" | "stays suspended" | "unchanged";
+  outlook: "runs" | "resumes (suspended; owner active and paid)" | "held (test-mode grant; starts only after a live-mode grant)" | "parked (no provisioning)" | "suspended on the next subscription event" | "kept running (paid, not active)" | "stays suspended" | "unchanged";
 };
 
 export type BackfillPlan = { rows: BackfillRow[]; estates: EstateOutlook[] };
@@ -58,11 +58,14 @@ export async function paidInvoicesOf(cfg: StripeConfig, subscriptionId: string, 
  * The selection rule for one subscription (pure; unit-tested with fixtures): the oldest invoice that names THIS
  * subscription and THIS customer and is a tier payment by the same test the invoice.paid handler applies.
  */
+/** The subscription an invoice names: the old top-level field or parent.subscription_details, an id or an expanded object. */
+export function invoiceSubscription(inv: any): string | null {
+  const ref = inv?.subscription ?? inv?.parent?.subscription_details?.subscription ?? null;
+  return typeof ref === "string" ? ref : ref?.id ?? null;
+}
+
 export function selectFirstTierPayment(invoices: any[], subscriptionId: string, customer: string, cfg: StripeConfig): any | null {
-  const subOf = (inv: any) => {
-    const ref = inv?.subscription ?? inv?.parent?.subscription_details?.subscription ?? null;
-    return typeof ref === "string" ? ref : ref?.id ?? null;
-  };
+  const subOf = invoiceSubscription;
   const cusOf = (inv: any) => (typeof inv?.customer === "string" ? inv.customer : inv?.customer?.id ?? null);
   const sorted = [...invoices].sort((a, b) => Number(a?.created ?? 0) - Number(b?.created ?? 0));
   return sorted.find((inv) => subOf(inv) === subscriptionId && cusOf(inv) === customer && isTierPaymentInvoice(inv, cfg)) ?? null;
@@ -92,7 +95,7 @@ async function planSubscription(
   const invoices = await paidInvoicesOf(cfg, subId, fetchImpl);
   const inv = selectFirstTierPayment(invoices, subId, customer, cfg);
   if (!inv) {
-    const truncated = invoices.some((i) => i?.subscription === subId && i?.lines?.has_more === true);
+    const truncated = invoices.some((i) => invoiceSubscription(i) === subId && i?.lines?.has_more === true);
     return { ...withStatus, reason: truncated ? "no qualifying invoice on the first page of lines (lines truncated): check by hand" : "no paid invoice with a positive NET tier line in the price book currency" };
   }
   return {
@@ -129,7 +132,11 @@ export async function planBackfill(cfg: StripeConfig, now: Date = new Date(), fe
     const paidAfter = !!subId && (cur.reason === "paid record already exists" || cur.action === "write");
     const granting = !!u && u.tier !== "sandbox" && !!b && ["active", "trialing", "past_due"].includes(b.status);
     const mayRun = granting && b!.status === "active" && paidAfter;
-    const outlook: EstateOutlook["outlook"] = mayRun
+    const outlook: EstateOutlook["outlook"] = e.test_hold || flyHeld(u ?? null)
+      ? "held (test-mode grant; starts only after a live-mode grant)"
+      : mayRun && e.status === "suspended"
+        ? "resumes (suspended; owner active and paid)"
+        : mayRun
       ? "runs"
       : e.status === "provisioning" || e.status === "pending_manual" || e.status === "error"
         ? granting && paidAfter && e.status === "error"

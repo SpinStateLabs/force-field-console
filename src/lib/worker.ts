@@ -16,7 +16,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { env } from "./store";
 import { advanceEstate, getEstate, saveEstate, upgradeEstateImage, workerActive, type AdvanceOutcome } from "./estates";
-import { renewSelfAgents, renewalDue } from "./renewal";
+import { renewSelfAgents, renewalBlocked, renewalDue } from "./renewal";
 import type { FlyClient } from "./fly";
 import type { FetchLike } from "./fly";
 
@@ -55,7 +55,7 @@ export async function kickWorker(userId: string, action: WorkerAction = "advance
 
 export type WorkerResult = {
   iterations: number;
-  last: AdvanceOutcome | "no_estate" | "worker_active" | "renewed" | "not_due" | "renew_failed" | "upgraded" | "unchanged" | "upgrade_failed";
+  last: AdvanceOutcome | "no_estate" | "worker_active" | "renewed" | "not_due" | "renew_failed" | "renew_skipped_ineligible" | "upgraded" | "unchanged" | "upgrade_failed";
   status: string | null;
 };
 
@@ -84,6 +84,7 @@ export async function runWorker(
 
   if (action === "renew") {
     try {
+      if (await renewalBlocked(e, fly)) return { iterations: 0, last: "renew_skipped_ineligible", status: e.status };
       await renewSelfAgents(e, fly);
       return { iterations: 1, last: "renewed", status: e.status };
     } catch {

@@ -11,6 +11,7 @@
 
 import { EstateError, SELF_AGENTS, estateSecret, lastJsonLine, logEstate, redactSecret, saveEstate, updateMachineGuarded, type Estate } from "./estates";
 import type { FlyClient } from "./fly";
+import { mayRunEstateFor } from "./paid";
 
 export const RENEW_AFTER_DAYS = 25;
 export const TOKEN_TTL_S = 30 * 86400 - 60; // under the roster row's max_ttl_days of 30
@@ -39,6 +40,18 @@ export function renewalDue(e: Estate, now: Date = new Date()): boolean {
     const at = e.self_agents[a.id]?.provisioned_at;
     return !at || new Date(at).getTime() < cutoff;
   });
+}
+
+/**
+ * The renewal rule for an owner who may not run an estate (the paid rule: past_due, active but never paid, ...): skip
+ * the renewal ONLY when the estate's machine is not running. A running estate in dunning keeps renewing (and, because
+ * the tick's image rollout waits for a due renewal, it keeps getting rollouts once renewed); a stopped one is left
+ * alone until the owner qualifies again (the in-machine mint would fail, and the rollout waits too). True = skip.
+ */
+export async function renewalBlocked(e: Estate, fly: FlyClient): Promise<boolean> {
+  if (await mayRunEstateFor(e.user_id)) return false;
+  const m = e.machine_id ? ((await fly.getMachine(e.app, e.machine_id, 8000)) as { state?: string } | null) : null;
+  return !(m?.state === "started" || m?.state === "starting");
 }
 
 /** Mint fresh 30-day tokens for the three self-agents, set them as secrets, restart the machine. */
