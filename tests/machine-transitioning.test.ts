@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
-import { EstateError, MAX_ATTEMPTS, TRANSIENT_MACHINE_STATES, TRANSITIONING_WAIT_MS, advanceEstate, autoRetryFailedEstate, getEstate, machineRunning, queueEstate, resumeEstate, retryEstate, saveEstate, suspendEstate, setEstateAnthropicKey, updateMachineGuarded, upgradeEstateImage } from "../src/lib/estates";
+import { EstateError, MAX_ATTEMPTS, TRANSIENT_MACHINE_STATES, TRANSITIONING_WAIT_MS, advanceEstate, autoRetryFailedEstate, getEstate, machineRunning, queueEstate, resumeEstate, retryEstate, reviveEstate, saveEstate, suspendEstate, setEstateAnthropicKey, updateMachineGuarded, upgradeEstateImage } from "../src/lib/estates";
 import { emailKey } from "../src/lib/users";
 
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
@@ -257,6 +257,32 @@ describe("transient machine states", () => {
     expect(after.error).toMatch(/^machine_missing/);
     expect(after.machine_id).toBeNull();
     expect(after.transitioning_since ?? null).toBeNull();
+  });
+
+  for (const pending of ["suspend_pending", "resume_pending"] as const) {
+    it(`reviving a record with ${pending} clears the marker`, async () => {
+      const e = await estateFor(`revive-${pending.split("_")[0]}@example.com`, "active");
+      const since = new Date(Date.now() - 20 * 60_000).toISOString();
+      const flag = pending === "suspend_pending"
+        ? { reason: "r", since, attempts: 1, last_error: "x", next_retry_at: null, failed: false }
+        : { since, attempts: 1, last_error: "x", next_retry_at: null, failed: false };
+      Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: since, [pending]: flag });
+      await saveEstate(e);
+      expect((await getEstate(e.user_id))!.transitioning_since).toBe(since);
+      await reviveEstate((await getEstate(e.user_id))!, null);
+      const after = (await getEstate(e.user_id))!;
+      expect(after[pending] ?? null).toBeNull();
+      expect(after.transitioning_since ?? null).toBeNull();
+    });
+  }
+
+  it("reviving a record with nothing pending leaves the marker", async () => {
+    const e = await estateFor("revive-none@example.com", "active");
+    const since = new Date(Date.now() - 60_000).toISOString();
+    Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: since });
+    await saveEstate(e);
+    await reviveEstate((await getEstate(e.user_id))!, null);
+    expect((await getEstate(e.user_id))!.transitioning_since).toBe(since);
   });
 
   it("the marker is cleared when the machine has settled and the step runs", async () => {

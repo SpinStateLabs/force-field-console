@@ -1223,9 +1223,10 @@ export async function reviveEstate(e: Estate, fly: FlyClient | null, now: Date =
   }
   e.suspend_pending = null;
   e.resume_pending = null;
+  e.transitioning_since = null; // a withdrawn suspension or resume ends the wait too: the next step starts a fresh one
   if (e.health && !e.health.ok && /^(suspend|resume) (pending|failed)/.test(e.health.note)) e.health = null;
   logEstate(e, "resume", "subscription is active again; the machine was checked and is running with proxy autostart on", now);
-  await saveEstate(e, now, { owns: [...OWN_PENDING, "resume_pending"] });
+  await saveEstate(e, now, { owns: [...OWN_PENDING, "resume_pending", "transitioning_since"] });
   return e;
 }
 
