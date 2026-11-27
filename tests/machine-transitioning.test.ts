@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
-import { EstateError, TRANSIENT_MACHINE_STATES, advanceEstate, getEstate, machineRunning, queueEstate, saveEstate, updateMachineGuarded } from "../src/lib/estates";
+import { EstateError, TRANSIENT_MACHINE_STATES, TRANSITIONING_WAIT_MS, advanceEstate, getEstate, machineRunning, queueEstate, saveEstate, setEstateAnthropicKey, updateMachineGuarded, upgradeEstateImage } from "../src/lib/estates";
 import { emailKey } from "../src/lib/users";
 
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
@@ -30,13 +30,20 @@ async function estateFor(email: string, status: string) {
   return e;
 }
 
-function fakeFly(state: string) {
+function fakeFly(state: string | string[]) {
   const writes: { skipLaunch: boolean }[] = [];
+  const secrets: string[] = [];
+  const states = Array.isArray(state) ? [...state] : [state];
   return {
     writes,
+    secrets,
     fly: {
       async getMachine() {
-        return { id: "m_1", state, config: { image: "img" } };
+        const s = states.length > 1 ? states.shift()! : states[0];
+        return { id: "m_1", state: s, config: { image: "img" } };
+      },
+      async setSecrets(_app: string, kv: Record<string, string>) {
+        secrets.push(...Object.keys(kv));
       },
       async updateMachine(_a: string, _id: string, _cfg: any, opts: { skipLaunch?: boolean } = {}) {
         writes.push({ skipLaunch: opts.skipLaunch === true });
@@ -48,15 +55,17 @@ function fakeFly(state: string) {
 
 describe("transient machine states", () => {
   it("the documented transient states never count as running", () => {
-    for (const s of ["creating", "starting", "stopping", "suspending", "destroying", "updating", "replacing", "restarting", "launch_failed"]) {
+    for (const s of ["creating", "starting", "stopping", "suspending", "destroying", "updating", "replacing", "restarting"]) {
       expect(TRANSIENT_MACHINE_STATES.has(s), s).toBe(true);
       expect(machineRunning({ state: s }), s).toBe(false);
     }
     expect(machineRunning({ state: "started" })).toBe(true);
+    expect(TRANSIENT_MACHINE_STATES.has("launch_failed")).toBe(false); // a failed start, not a passing state
+    expect(machineRunning({ state: "launch_failed" })).toBe(false);
     expect(machineRunning({ state: "stopped" })).toBe(false);
   });
 
-  for (const state of ["creating", "starting", "stopping", "suspending", "destroying", "updating", "replacing", "restarting", "launch_failed"]) {
+  for (const state of ["creating", "starting", "stopping", "suspending", "destroying", "updating", "replacing", "restarting"]) {
     it(`ineligible owner, machine ${state}: nothing is written; 409 machine_transitioning (retryable)`, async () => {
       const e = await estateFor(`t-${state}@example.com`, "past_due");
       const { fly, writes } = fakeFly(state);
@@ -107,5 +116,80 @@ describe("transient machine states", () => {
     expect(after.attempts).toBe(0);
     expect(after.step).toBe("arm");
     expect(after.status).toBe("provisioning");
+  });
+  it("ineligible owner, machine launch_failed: not transient; written with skip_launch, as for any machine not running", async () => {
+    const e = await estateFor("lf@example.com", "past_due");
+    const { fly, writes } = fakeFly("launch_failed");
+    expect(await updateMachineGuarded(e, fly, () => ({ image: "new" }) as any)).toEqual({ launched: false });
+    expect(writes).toEqual([{ skipLaunch: true }]);
+  });
+
+  async function armWaiting(email: string, sinceMsAgo: number | null) {
+    const e = await estateFor(email, "active");
+    Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: sinceMsAgo === null ? null : new Date(Date.now() - sinceMsAgo).toISOString() });
+    await saveEstate(e, undefined, { owns: ["status", "step"] });
+    const key = emailKey(email);
+    const realGet = st.get.bind(st);
+    let reads = 0;
+    st.get = async (k: string, o: any) => {
+      const v = await realGet(k, o);
+      if (k === key && v && ++reads > 1) return { ...v, billing: { ...v.billing, status: "past_due" } };
+      return v;
+    };
+    return e;
+  }
+
+  it("the wait is bounded: under 30 minutes it waits (no attempt), the marker is set once", async () => {
+    const e = await armWaiting("under@example.com", 10 * 60_000);
+    const before = (await getEstate(e.user_id))!.transitioning_since;
+    const r = await advanceEstate((await getEstate(e.user_id))!, fakeFly("replacing").fly);
+    expect(r.outcome).toBe("waiting");
+    const after = (await getEstate(e.user_id))!;
+    expect(after.attempts).toBe(0);
+    expect(after.transitioning_since).toBe(before); // not moved forward
+  });
+
+  it("the wait is bounded: past 30 minutes the step is an ordinary failed attempt (counted, error text)", async () => {
+    const e = await armWaiting("over@example.com", TRANSITIONING_WAIT_MS + 60_000);
+    const r = await advanceEstate((await getEstate(e.user_id))!, fakeFly("replacing").fly);
+    expect(r.outcome).toBe("error");
+    const after = (await getEstate(e.user_id))!;
+    expect(after.attempts).toBe(1);
+    expect(after.error).toMatch(/changing state/);
+  });
+
+  it("the marker is cleared when the machine has settled and the step runs", async () => {
+    const e = await estateFor("settled@example.com", "active");
+    Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: new Date(Date.now() - 5 * 60_000).toISOString() });
+    await saveEstate(e, undefined, { owns: ["status", "step"] });
+    const { fly } = fakeFly("started");
+    (fly as any).getMachine = async () => ({ id: "m_1", state: "started", config: { image: "img" } });
+    const noNet: any = async () => new Response("{}", { status: 503 });
+    const r = await advanceEstate((await getEstate(e.user_id))!, fly, { fetchImpl: noNet });
+    expect(r.outcome).not.toBe("waiting");
+    expect((await getEstate(e.user_id))!.transitioning_since ?? null).toBeNull();
+  });
+
+  it("upgrade: a machine that starts changing state inside the lock defers the upgrade; it is not a failed rollout", async () => {
+    const e = await estateFor("upg@example.com", "past_due");
+    Object.assign(e, { image: "registry.fly.io/x:old" });
+    await saveEstate(e);
+    const { fly, writes } = fakeFly(["started", "replacing"]); // the pre-check sees started; the lock sees replacing
+    const r = await upgradeEstateImage((await getEstate(e.user_id))!, fly);
+    expect(r.outcome).toBe("unchanged");
+    expect(writes).toEqual([]);
+    const after = (await getEstate(e.user_id))!;
+    expect(after.upgrade_deferred?.image).toBe("registry.fly.io/x:y");
+    expect(after.upgrade_failed_image ?? null).toBeNull();
+  });
+
+  it("key placement: a transitioning machine of an ineligible owner refuses BEFORE the secret is written", async () => {
+    const e = await estateFor("key@example.com", "past_due");
+    const { fly, secrets, writes } = fakeFly("restarting");
+    const err = await setEstateAnthropicKey((await getEstate(e.user_id))!, fly, "sk-ant-api03-" + "a".repeat(90)).then(() => null, (x) => x);
+    expect(err).toBeInstanceOf(EstateError);
+    expect(err.code).toBe("machine_transitioning");
+    expect(secrets).toEqual([]);
+    expect(writes).toEqual([]);
   });
 });
