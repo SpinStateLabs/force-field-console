@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createHash } from "node:crypto";
+import { issueKey, revokeKey } from "../src/lib/keys";
 import { freshStore } from "./helpers";
 import {
   createUser,
   verifyUser,
   getUserById,
   saveUser,
+  UserRecordMissing,
   BadEmail,
   isAcceptableEmail,
   WeakPassword,
@@ -196,6 +198,35 @@ describe("users", () => {
       await saveUser(u);
       expect(((await store.get(emailKey(NFC), { type: "json" })) as any).tier).toBe("operator");
       expect((await getUserById(u.id))!.tier).toBe("operator");
+    });
+
+    it("issueKey then revokeKey on an older NFD account: by-id reads see both, and no second record appears", async () => {
+      const store = freshStore();
+      const bcrypt = (await import("bcryptjs")).default;
+      const legacy = { id: "33333333-3333-3333-3333-333333333333", email: NFD, pw_hash: bcrypt.hashSync(GOOD_PASSWORD, 4), tier: "sandbox" as const, created_at: "2026-01-01T00:00:00Z", keys: [] as any[] };
+      await store.setJSON(oldKey(NFD), legacy);
+      await store.setJSON("uid/" + legacy.id, { email_key: oldKey(NFD) });
+      const { ref } = await issueKey((await getUserById(legacy.id))!, "k1");
+      expect((await getUserById(legacy.id))!.keys.map((k) => k.hash)).toEqual([ref.hash]);
+      expect(await revokeKey((await getUserById(legacy.id))!, ref.hash)).toBe(true);
+      expect((await getUserById(legacy.id))!.keys[0].revoked).toBe(true);
+      const records = (await store.list({ prefix: "users/" })).blobs.map((b: any) => b.key);
+      expect(records).toEqual([oldKey(NFD)]);
+    });
+
+    it("saveUser with no uid pointer refuses when the email's key holds no record, and writes nothing", async () => {
+      const store = freshStore();
+      const ghost = { id: "44444444-4444-4444-4444-444444444444", email: "ghost@example.com", pw_hash: "x", tier: "sandbox" as const, created_at: "2026-01-01T00:00:00Z", keys: [] as any[] };
+      await expect(saveUser(ghost as any)).rejects.toBeInstanceOf(UserRecordMissing);
+      expect((await store.list({ prefix: "users/" })).blobs).toEqual([]);
+    });
+
+    it("saveUser with no uid pointer still rewrites a record that is at the email's key", async () => {
+      const store = freshStore();
+      const rec = { id: "55555555-5555-5555-5555-555555555555", email: "kept@example.com", pw_hash: "x", tier: "sandbox" as const, created_at: "2026-01-01T00:00:00Z", keys: [] as any[] };
+      await store.setJSON(emailKey("kept@example.com"), rec);
+      await saveUser({ ...rec, tier: "operator" } as any);
+      expect(((await store.get(emailKey("kept@example.com"), { type: "json" })) as any).tier).toBe("operator");
     });
 
     it("refuses a domain that ends in a dot, so one address cannot hold two accounts", async () => {

@@ -51,6 +51,8 @@ export type User = {
 export class BadEmail extends Error {}
 export class WeakPassword extends Error {}
 export class EmailTaken extends Error {}
+/** saveUser found no record to rewrite: neither a uid pointer nor a record at the email's key. Nothing was written. */
+export class UserRecordMissing extends Error {}
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 /** RFC 5321 path limit. The email becomes the estate grantor, the owner-roster row and the attestation signer statement. */
@@ -177,6 +179,15 @@ export async function getUserById(id: string): Promise<User | null> {
 export async function saveUser(u: User): Promise<void> {
   const store = await portalStore();
   const pointer = (await store.get("uid/" + u.id, { type: "json" })) as { email_key?: string } | null;
-  const key = typeof pointer?.email_key === "string" && pointer.email_key.startsWith("users/") ? pointer.email_key : emailKey(u.email);
+  if (typeof pointer?.email_key === "string" && pointer.email_key.startsWith("users/")) {
+    await store.setJSON(pointer.email_key, u);
+    return;
+  }
+  // No pointer: rewrite the record at the email's key only if one is there. Creating a record here would leave an
+  // account no by-id read can find; createUser is the only place that creates a record (with its pointer).
+  const key = emailKey(u.email);
+  if (!(await store.get(key, { type: "json" }))) {
+    throw new UserRecordMissing("No stored account matches this user; nothing was written.");
+  }
   await store.setJSON(key, u);
 }
