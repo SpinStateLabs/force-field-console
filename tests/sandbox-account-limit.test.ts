@@ -7,7 +7,7 @@ import { createUser, getUserById, type User } from "../src/lib/users";
 import { issueKey, revokeKey } from "../src/lib/keys";
 import { queueEstate, saveEstate } from "../src/lib/estates";
 import { estateOrigin } from "../src/lib/fly";
-import { sandboxLimits } from "../src/lib/sandboxlimit";
+import { GLOBAL_KEY, accountKey, sandboxLimits } from "../src/lib/sandboxlimit";
 import { TIERS } from "../src/lib/tiers";
 
 const ctx = {} as any;
@@ -127,9 +127,9 @@ describe("shared sandbox: sentinel checks per account", () => {
     expect(Number(r.headers.get("retry-after"))).toBe(12 * 3600 - 5);
   });
 
-  it("a counter write that keeps losing is refused, never let through uncounted", async () => {
+  it("a write of the account record that keeps losing is refused (429, retry-after 1), never let through uncounted", async () => {
     const k = await newKey(await account("busy@example.com"));
-    expect((await send(k)).status).toBe(200); // creates the counters
+    expect((await send(k)).status).toBe(200); // creates the account record
     store.setJSONIfMatch = async () => false;
     const r = await send(k);
     expect(r.status).toBe(429);
@@ -137,29 +137,59 @@ describe("shared sandbox: sentinel checks per account", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("a minute counter write that keeps losing is refused too", async () => {
-    const k = await newKey(await account("busy-minute@example.com"));
-    expect((await send(k)).status).toBe(200);
-    const real = store.setJSONIfMatch.bind(store);
-    store.setJSONIfMatch = async (key: string, v: any, etag: string) => (key.includes("/m") ? false : real(key, v, etag));
-    const r = await send(k);
-    expect(r.status).toBe(429);
-    expect(r.headers.get("retry-after")).toBe("1");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  it("200 checks in one minute: 10 answered, 190 refused, and the refused ones use up no day slots", async () => {
+    delete process.env.SANDBOX_ACCOUNT_RPM; // defaults: 10 per minute, 200 per day
+    const u = await account("burst@example.com");
+    const keys = [];
+    for (let i = 0; i < 20; i++) keys.push(await newKey(u)); // 10 calls per key stays under the per-key limit
+    const codes: Record<number, number> = {};
+    for (let i = 0; i < 200; i++) {
+      const r = await send(keys[i % 20]);
+      codes[r.status] = (codes[r.status] ?? 0) + 1;
+      if (r.status === 429) expect((await r.json()).error.code).toBe("rate_limited_account");
+    }
+    expect(codes).toEqual({ 200: 10, 429: 190 });
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    const rec = (await store.get(accountKey(u.id), { type: "json" })) as any;
+    expect(rec).toMatchObject({ day: "20261126", d: 10, minute: "202611261200", m: 10 });
+    expect(TIERS.sandbox.rpd - rec.d).toBe(190);
   });
 
-  it("the ceiling across accounts, when set, answers 503 sandbox_busy; off by default", async () => {
+  it("one record per account holds both windows (no record per minute)", async () => {
+    const u = await account("onerecord@example.com");
+    const k = await newKey(u);
+    expect((await send(k)).status).toBe(200);
+    vi.setSystemTime(new Date("2026-11-26T12:01:05Z"));
+    expect((await send(k)).status).toBe(200);
+    const keys = (await store.list({ prefix: "rate/acct/" })).blobs.map((b: any) => b.key);
+    expect(keys).toEqual([accountKey(u.id)]);
+    expect(await store.get(accountKey(u.id), { type: "json" })).toMatchObject({ d: 2, minute: "202611261201", m: 1 });
+  });
+
+  it("the ceiling across accounts, when set, answers 503 sandbox_busy, counts only allowed checks, and spends no account budget", async () => {
     const keys = [];
-    for (const e of ["g1@example.com", "g2@example.com", "g3@example.com"]) keys.push(await newKey(await account(e)));
-    for (const k of keys) expect((await send(k)).status).toBe(200); // default: no ceiling
-    process.env.SANDBOX_GLOBAL_RPM = "4"; // the ceiling counts only while it is set: these are calls 1-4
+    const users = [];
+    for (const e of ["g1@example.com", "g2@example.com", "g3@example.com"]) {
+      const u = await account(e);
+      users.push(u);
+      keys.push(await newKey(u));
+    }
+    for (const k of keys) expect((await send(k)).status).toBe(200); // default: no ceiling, nothing recorded for it
+    expect(await store.get(GLOBAL_KEY, { type: "json" })).toBeNull();
+    process.env.SANDBOX_GLOBAL_RPM = "4";
     expect((await send(keys[0])).status).toBe(200);
     expect((await send(keys[1])).status).toBe(200);
     expect((await send(keys[2])).status).toBe(200);
-    expect((await send(keys[0])).status).toBe(200);
-    const r = await send(keys[1]);
+    // keys[0] is now at its account limit of 3: refused by the account check, so the ceiling does not count it
+    expect((await send(keys[0])).status).toBe(429);
+    expect(await store.get(GLOBAL_KEY, { type: "json" })).toMatchObject({ count: 3 });
+    process.env.SANDBOX_ACCOUNT_RPM = "10";
+    expect((await send(keys[1])).status).toBe(200); // the 4th counted check
+    const before = ((await store.get(accountKey(users[2].id), { type: "json" })) as any).d;
+    const r = await send(keys[2]);
     expect(r.status).toBe(503);
     expect((await r.json()).error.code).toBe("sandbox_busy");
+    expect(((await store.get(accountKey(users[2].id), { type: "json" })) as any).d).toBe(before); // no account slot spent
     expect(warn).toHaveBeenCalledWith(JSON.stringify({ gateway_refusal: "sandbox_busy" }));
   });
 
