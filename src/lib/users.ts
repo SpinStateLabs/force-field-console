@@ -49,11 +49,18 @@ export type User = {
 };
 
 export class BadEmail extends Error {}
+/** A new account's address uses characters outside plain ASCII. */
+export class NonAsciiEmail extends BadEmail {}
 export class WeakPassword extends Error {}
 export class EmailTaken extends Error {}
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const MIN_PASSWORD_LENGTH = 10;
+/** The characters a new account's address may use: ASCII from "!" to "~" (no spaces, controls or anything beyond). */
+const PLAIN_ASCII_RE = /^[\x21-\x7e]+$/;
+export const NOT_PLAIN_ASCII =
+  "Use an email address written in plain ASCII: unaccented Latin letters, digits and the usual signs. " +
+  "A domain with other letters can be entered in its xn-- form.";
 
 /** Blob key for a user record: "users/" + sha256hex(normalized email). */
 export function emailKey(email: string): string {
@@ -63,6 +70,8 @@ export function emailKey(email: string): string {
 
 export async function createUser(email: string, password: string): Promise<User> {
   if (!EMAIL_RE.test(email)) throw new BadEmail("Invalid email address.");
+  // For new accounts only, and tested on the value as typed, before any case folding. Sign-in is unchanged.
+  if (!PLAIN_ASCII_RE.test(email)) throw new NonAsciiEmail(NOT_PLAIN_ASCII);
   if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
     throw new WeakPassword(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
   }

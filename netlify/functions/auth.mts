@@ -2,7 +2,7 @@
 // Registration, login, logout. Session is an HS256 JWT in the ff_session cookie.
 // Never log emails, passwords, or tokens.
 import type { Context, Config } from "@netlify/functions";
-import { createUser, verifyUser, BadEmail, WeakPassword, EmailTaken } from "../../src/lib/users";
+import { createUser, verifyUser, BadEmail, NonAsciiEmail, WeakPassword, EmailTaken } from "../../src/lib/users";
 import { issueSession, sessionCookie, clearSessionCookie } from "../../src/lib/session";
 
 function json(status: number, body: unknown, headers?: Record<string, string>): Response {
@@ -45,6 +45,9 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       const token = await issueSession(user.id);
       return json(201, { email: user.email, tier: user.tier }, { "set-cookie": sessionCookie(token) });
     } catch (e) {
+      if (e instanceof NonAsciiEmail) {
+        return err(400, "bad_email", e.message);
+      }
       if (e instanceof BadEmail) {
         return err(400, "bad_email", "That does not look like a valid email address.");
       }
