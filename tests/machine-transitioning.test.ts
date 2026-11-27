@@ -26,7 +26,7 @@ async function estateFor(email: string, status: string) {
   await st.setJSON("paid_subscriptions/" + sub, { customer: "cus_1", first_paid_invoice: "in_1", at: "2026-11-01T00:00:00Z" });
   const e = await queueEstate(u);
   Object.assign(e, { status: "ready", step: "done", machine_id: "m_1", volume_id: "vol_1", url: `https://${e.app}.fly.dev` });
-  await saveEstate(e, undefined, { owns: ["status", "machine_id", "step"] });
+  await saveEstate(e); // whole-record write: every field persists (an owned write keeps only the named fields)
   return e;
 }
 
@@ -98,7 +98,7 @@ describe("transient machine states", () => {
   it("a provisioning step that meets a transient machine waits: no attempt spent, the step stays", async () => {
     const e = await estateFor("armwait@example.com", "active");
     Object.assign(e, { status: "provisioning", step: "arm", attempts: 0 });
-    await saveEstate(e, undefined, { owns: ["status", "step"] });
+    await saveEstate(e);
     // the owner qualifies at the provisioning gate, then stops qualifying before the arm write (a race)
     const key = emailKey("armwait@example.com");
     const realGet = st.get.bind(st);
@@ -127,7 +127,7 @@ describe("transient machine states", () => {
   async function armWaiting(email: string, sinceMsAgo: number | null) {
     const e = await estateFor(email, "active");
     Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: sinceMsAgo === null ? null : new Date(Date.now() - sinceMsAgo).toISOString() });
-    await saveEstate(e, undefined, { owns: ["status", "step"] });
+    await saveEstate(e);
     const key = emailKey(email);
     const realGet = st.get.bind(st);
     let reads = 0;
@@ -161,7 +161,7 @@ describe("transient machine states", () => {
   it("the marker is cleared when the machine has settled and the step runs", async () => {
     const e = await estateFor("settled@example.com", "active");
     Object.assign(e, { status: "provisioning", step: "arm", attempts: 0, transitioning_since: new Date(Date.now() - 5 * 60_000).toISOString() });
-    await saveEstate(e, undefined, { owns: ["status", "step"] });
+    await saveEstate(e);
     const { fly } = fakeFly("started");
     (fly as any).getMachine = async () => ({ id: "m_1", state: "started", config: { image: "img" } });
     const noNet: any = async () => new Response("{}", { status: 503 });
