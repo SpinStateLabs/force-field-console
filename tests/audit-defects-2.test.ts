@@ -16,7 +16,7 @@ import {
   MAX_SUSPEND_RETRIES,
   advanceEstate,
   checkEstateHealth,
-  clearSuspendPending,
+  reviveEstate,
   estateKey,
   getEstate,
   publicEstate,
@@ -172,7 +172,7 @@ describe("MED 3: authoritative writes merge only the fields they own", () => {
     worker.step = "done";
     worker.machine_id = "m_1";
     await saveEstate(worker);
-    await clearSuspendPending(stale, "active again");
+    await reviveEstate(stale, null);
     const stored = (await getEstate(user.id))!;
     expect(stored.suspend_pending).toBeNull();
     expect(stored.status).toBe("ready");

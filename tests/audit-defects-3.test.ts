@@ -13,7 +13,7 @@ import { issueSession, sessionCookie } from "../src/lib/session";
 import { stripeConfig } from "../src/lib/stripe";
 import { FlyError } from "../src/lib/fly";
 import { advanceSubscriptionMark, claimCheckout, handleStripeEvent, releaseCheckout, retryPendingSuspend, withSubscriptionLock } from "../src/lib/billing";
-import { clearSuspendPending, getEstate, queueEstate, saveEstate, suspendEstate, type Estate } from "../src/lib/estates";
+import { getEstate, queueEstate, reviveEstate, saveEstate, suspendEstate, type Estate } from "../src/lib/estates";
 
 const ctx = {} as any;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -173,7 +173,7 @@ describe("MED: the tick's suspend retry cannot override a reactivation", () => {
       updateMachine: (a: string, i: string, c: any, o?: any) => model.updateMachine(a, i, c, o),
       waitMachine: (a: string, i: string, s: string) => model.waitMachine(a, i, s),
       async stopMachine() {
-        await clearSuspendPending((await getEstate(user.id))!, "active again");
+        await reviveEstate((await getEstate(user.id))!, null);
         throw new FlyError(503, "x", "boom");
       },
     };

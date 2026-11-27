@@ -1016,16 +1016,6 @@ export function machineAwake(m: { state?: string; config?: MachineConfig | null 
   return !m.config || (m.config.services ?? []).some((s: any) => s.autostart !== false);
 }
 
-/** A pending suspension is moot (the subscription is active again): drop it; the machine was never stopped. */
-export async function clearSuspendPending(e: Estate, why: string, now: Date = new Date()): Promise<Estate> {
-  if (!e.suspend_pending) return e;
-  e.suspend_pending = null;
-  if (e.health && !e.health.ok && /^suspend (pending|failed)/.test(e.health.note)) e.health = null;
-  logEstate(e, "suspend", `pending suspension cleared: ${why}`, now);
-  await saveEstate(e, now, { owns: OWN_PENDING });
-  return e;
-}
-
 /**
  * Make a machine durably stopped. Stopping alone is NOT durable: with the proxy's autostart on,
  * any inbound request (a customer, a scanner, a health look) starts a stopped machine again and
