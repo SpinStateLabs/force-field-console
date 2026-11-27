@@ -3,7 +3,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { freshStore } from "./helpers";
 import { createUser, saveUser, type User } from "../src/lib/users";
-import { EstateError, TRANSIENT_MACHINE_STATES, machineRunning, queueEstate, saveEstate, updateMachineGuarded } from "../src/lib/estates";
+import { EstateError, TRANSIENT_MACHINE_STATES, advanceEstate, getEstate, machineRunning, queueEstate, saveEstate, updateMachineGuarded } from "../src/lib/estates";
+import { emailKey } from "../src/lib/users";
 
 const FLY_ENV = { FLY_API_TOKEN: "fo1_test", FLY_ORG_SLUG: "personal", FLY_ESTATE_IMAGE: "registry.fly.io/x:y", ESTATE_SECRET_MASTER: "master-0123456789" };
 let st: any;
@@ -84,5 +85,27 @@ describe("transient machine states", () => {
     const { fly, writes } = fakeFly("replacing");
     expect(await updateMachineGuarded(e, fly, () => ({ image: "new" }) as any)).toEqual({ launched: true });
     expect(writes).toEqual([{ skipLaunch: false }]);
+  });
+  it("a provisioning step that meets a transient machine waits: no attempt spent, the step stays", async () => {
+    const e = await estateFor("armwait@example.com", "active");
+    Object.assign(e, { status: "provisioning", step: "arm", attempts: 0 });
+    await saveEstate(e, undefined, { owns: ["status", "step"] });
+    // the owner qualifies at the provisioning gate, then stops qualifying before the arm write (a race)
+    const key = emailKey("armwait@example.com");
+    const realGet = st.get.bind(st);
+    let reads = 0;
+    st.get = async (k: string, o: any) => {
+      const v = await realGet(k, o);
+      if (k === key && v && ++reads > 1) return { ...v, billing: { ...v.billing, status: "past_due" } };
+      return v;
+    };
+    const { fly, writes } = fakeFly("replacing");
+    const r = await advanceEstate((await getEstate(e.user_id))!, fly);
+    expect(r.outcome).toBe("waiting");
+    expect(writes).toEqual([]);
+    const after = (await getEstate(e.user_id))!;
+    expect(after.attempts).toBe(0);
+    expect(after.step).toBe("arm");
+    expect(after.status).toBe("provisioning");
   });
 });
