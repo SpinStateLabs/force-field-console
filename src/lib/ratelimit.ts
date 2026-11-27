@@ -27,10 +27,16 @@ function windowKeys(keyHashHex: string, t: Date): { minuteKey: string; dayKey: s
   };
 }
 
+/**
+ * Decide one call for this key and, unless ``opts.count`` is false, count it. With ``count: false`` the caller counts the
+ * call later with ``countRateLimit`` once it is allowed by every other check (the shared sandbox's per-account limit), so
+ * a call refused there spends nothing here either.
+ */
 export async function checkRateLimit(
   keyHashHex: string,
   tier: Tier,
   now?: Date,
+  opts: { count?: boolean } = {},
 ): Promise<{ allowed: boolean; remaining_minute: number; remaining_day: number; retry_after_s?: number }> {
   const t = now ?? new Date();
   const limits = TIERS[tier];
@@ -65,12 +71,24 @@ export async function checkRateLimit(
     };
   }
 
-  await store.setJSON(minuteKey, { count: minuteCount + 1 });
-  await store.setJSON(dayKey, { count: dayCount + 1 });
+  if (opts.count !== false) {
+    await store.setJSON(minuteKey, { count: minuteCount + 1 });
+    await store.setJSON(dayKey, { count: dayCount + 1 });
+  }
 
   return {
     allowed: true,
     remaining_minute: limits.rpm - (minuteCount + 1),
     remaining_day: limits.rpd - (dayCount + 1),
   };
+}
+
+/** Count one call for this key in both windows (approximate, like checkRateLimit). */
+export async function countRateLimit(keyHashHex: string, now?: Date): Promise<void> {
+  const { minuteKey, dayKey } = windowKeys(keyHashHex, now ?? new Date());
+  const store = await portalStore();
+  const minuteRec = (await store.get(minuteKey, { type: "json" })) as { count: number } | null;
+  const dayRec = (await store.get(dayKey, { type: "json" })) as { count: number } | null;
+  await store.setJSON(minuteKey, { count: (minuteRec?.count ?? 0) + 1 });
+  await store.setJSON(dayKey, { count: (dayRec?.count ?? 0) + 1 });
 }

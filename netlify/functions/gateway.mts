@@ -6,7 +6,7 @@
 import type { Context, Config } from "@netlify/functions";
 import { env } from "../../src/lib/store";
 import { lookupKey } from "../../src/lib/keys";
-import { checkRateLimit } from "../../src/lib/ratelimit";
+import { checkRateLimit, countRateLimit } from "../../src/lib/ratelimit";
 import { countSandboxGlobal, peekSandboxGlobal, takeSandboxCheck } from "../../src/lib/sandboxlimit";
 import { getEstate, newAppName, resolveRoute } from "../../src/lib/estates";
 import { estateOrigin } from "../../src/lib/fly";
@@ -61,7 +61,8 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   const { user, ref } = found;
 
   // --- Rate limit (Declared, approximate fixed windows — not an Enforced hard cap). ---
-  const rl = await checkRateLimit(ref.hash, user.tier);
+  // Decided here, counted below: a shared-sandbox sentinel check is counted only once the per-account limit allows it.
+  const rl = await checkRateLimit(ref.hash, user.tier, undefined, { count: false });
   if (!rl.allowed) {
     const retryAfter = String(rl.retry_after_s ?? 60);
     return err(
@@ -77,6 +78,8 @@ export default async (req: Request, _context: Context): Promise<Response> => {
   // silently falling back to the sandbox (which would mix the tenant's data).
   const estate = await getEstate(user.id);
   const route = resolveRoute(user, estate);
+  const sandboxCheck = route.kind === "sandbox" && req.method.toUpperCase() === "POST" && url.pathname.slice(GATEWAY_PREFIX.length) === "/sentinel/check";
+  if (!sandboxCheck) await countRateLimit(ref.hash); // every other call is counted per key as before
   if (route.kind === "refuse") {
     return err(route.status, route.code, route.message);
   }
@@ -126,6 +129,7 @@ export default async (req: Request, _context: Context): Promise<Response> => {
       logRefusal("sandbox_account_limit");
       return err(429, "rate_limited_account", "The shared sandbox limits sentinel checks per account; retry after the window resets.", { "retry-after": String(mine.retry_after_s) });
     }
+    await countRateLimit(ref.hash); // the per-key count, only for a check the account limit allowed
     await countSandboxGlobal();
   }
 
